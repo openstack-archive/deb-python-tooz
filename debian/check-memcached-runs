@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+set -x
+
+# If it's already up, don't do anything
+IS_UP=`netstat -anle | grep LISTEN | grep 127.0.0.1:11211 | awk '{print $4}'`
+if [ "${IS_UP}" = "127.0.0.1:11211" ] ; then
+	exit 0
+fi
+
+/sbin/start-stop-daemon --start --background --quiet --make-pidfile --pidfile `pwd`/TEST_PID_MEMCACHE.pid --exec /usr/bin/memcached -- /etc/memcached.conf

@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+PID_PATH=`pwd`/TEST_PID_MEMCACHE.pid
+
+if [ -r "${PID_PATH}" ] ; then
+	PID=`cat ${PID_PATH}`
+fi
+
+echo "Killing process ${PID}"
+kill -9 ${PID}

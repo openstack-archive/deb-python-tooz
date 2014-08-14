@@ -26,6 +26,8 @@ override_dh_install:
 
 override_dh_auto_test:
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
+	chmod +x $(CURDIR)/debian/check-memcached-off $(CURDIR)/debian/check-memcached-runs
+	$(CURDIR)/debian/check-memcached-runs
 	echo "===> Running tests"
 	set -e ; for i in 2.7 $(PYTHON3S) ; do \
 		PYMAJOR=`echo $$i | cut -d'.' -f1` ; \
@@ -38,11 +40,12 @@ ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
 		rm -f $$TEMP_REZ ; \
 		testr-python$$PYMAJOR slowest ; \
 	done
+	$(CURDIR)/debian/check-memcached-off
 endif
 
 override_dh_clean:
 	dh_clean -O--buildsystem=python_distutils
-	rm -rf build
+	rm -rf build TEST_PID_MEMCACHE.pid
 
 override_dh_sphinxdoc:
 	sphinx-build -b html doc/source debian/python-tooz-doc/usr/share/doc/python-tooz-doc/html
