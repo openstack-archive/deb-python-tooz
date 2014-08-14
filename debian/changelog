@@ -1,0 +1,5 @@
+python-tooz (0.3-1) unstable; urgency=medium
+
+  * Initial release. (Closes: #758138)
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 14 Aug 2014 21:57:41 +0800

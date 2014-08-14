@@ -1,0 +1,9 @@
+Document: python-tooz-doc
+Title: tooz Documentation
+Author: N/A
+Abstract: Sphinx documentation for tooz
+Section: Programming/Python
+
+Format: HTML
+Index: /usr/share/doc/python-tooz-doc/html/index.html
+Files: /usr/share/doc/python-tooz-doc/html/*
