@@ -1,3 +1,10 @@
+python-tooz (0.3-2) unstable; urgency=medium
+
+  * Check if memcached is started before building, start it if it isn't. Thanks
+    to Lucas Nussbaum for the bug report. (Closes: #759976)
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 01 Sep 2014 02:06:47 +0000
+
 python-tooz (0.3-1) unstable; urgency=medium
 
   * Initial release. (Closes: #758138)
