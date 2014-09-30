@@ -1,3 +1,9 @@
+python-tooz (0.4-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 30 Sep 2014 08:52:36 +0000
+
 python-tooz (0.3-3) unstable; urgency=medium
 
   * Only kill memcached if the packaging script started it.
