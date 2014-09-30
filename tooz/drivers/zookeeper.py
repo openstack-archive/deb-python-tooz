@@ -16,24 +16,25 @@
 
 import collections
 import copy
-import threading
 
 from kazoo import client
 from kazoo import exceptions
 from kazoo.protocol import paths
 import six
-import zake.fake_client
-import zake.fake_storage
 
 from tooz import coordination
 from tooz import locking
+from tooz import utils
 
 
 class ZooKeeperLock(locking.Lock):
-    def __init__(self, lock):
+    def __init__(self, name, lock, timeout):
+        super(ZooKeeperLock, self).__init__(name)
         self._lock = lock
+        self.timeout = timeout
 
-    def acquire(self, blocking=True, timeout=None):
+    def acquire(self, blocking=True):
+        timeout = self.timeout if blocking else None
         return self._lock.acquire(blocking=blocking,
                                   timeout=timeout)
 
@@ -42,6 +43,15 @@ class ZooKeeperLock(locking.Lock):
 
 
 class BaseZooKeeperDriver(coordination.CoordinationDriver):
+    """Initialize the zookeeper driver.
+
+    :param timeout: connection timeout to wait when first connecting to the
+                    zookeeper server
+    :param lock_timeout: how many seconds to wait when trying to acquire
+                         a lock in blocking mode. None means forever, 0
+                         means don't wait, any other value means wait
+                         this amount of seconds.
+    """
 
     _TOOZ_NAMESPACE = b"tooz"
 
@@ -49,6 +59,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         super(BaseZooKeeperDriver, self).__init__()
         self._member_id = member_id
         self.timeout = int(options.get('timeout', ['10'])[-1])
+        self.lock_timeout = int(options.get('lock_timeout', ['30'])[-1])
 
     def start(self):
         try:
@@ -62,7 +73,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
             raise coordination.ToozError("operation error: %s" % (e))
 
         self._group_members = collections.defaultdict(set)
-        self._watchers = six.moves.queue.Queue()
+        self._watchers = collections.deque()
         self._leader_locks = {}
 
     def stop(self):
@@ -77,7 +88,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.ToozError("tooz namespace has not been created")
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
 
     def create_group(self, group_id):
         group_path = self._path_group(group_id)
@@ -94,7 +105,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.GroupNotCreated(group_id)
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
 
     def join_group(self, group_id, capabilities=b""):
         member_path = self._path_member(group_id, self._member_id)
@@ -111,7 +122,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.MemberNotJoined(group_id, member_id)
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
 
     def leave_group(self, group_id):
         member_path = self._path_member(group_id, self._member_id)
@@ -126,7 +137,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.GroupNotCreated(group_id)
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
         else:
             return set(m.encode('ascii') for m in members_ids)
 
@@ -144,7 +155,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.MemberNotJoined(group_id, member_id)
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
 
     def update_capabilities(self, group_id, capabilities):
         member_path = self._path_member(group_id, self._member_id)
@@ -160,7 +171,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.MemberNotJoined(group_id, member_id)
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
         else:
             return capabilities
 
@@ -178,7 +189,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
         except exceptions.NoNodeError:
             raise coordination.ToozError("tooz namespace has not been created")
         except exceptions.ZookeeperError as e:
-            raise coordination.ToozError(str(e))
+            raise coordination.ToozError(utils.exception_message(e))
         else:
             return set(g.encode('ascii') for g in group_ids)
 
@@ -210,8 +221,12 @@ class KazooDriver(BaseZooKeeperDriver):
 
     def __init__(self, member_id, parsed_url, options):
         super(KazooDriver, self).__init__(member_id, parsed_url, options)
-        self._coord = client.KazooClient(hosts=parsed_url.netloc)
+        self._coord = self._make_client(parsed_url, options)
         self._member_id = member_id
+
+    @classmethod
+    def _make_client(cls, parsed_url, options):
+        return client.KazooClient(hosts=parsed_url.netloc)
 
     def _watch_group(self, group_id):
         get_members_req = self.get_members(group_id)
@@ -227,7 +242,7 @@ class KazooDriver(BaseZooKeeperDriver):
                 # Copy function in case it's removed later from the
                 # hook list
                 hooks = copy.copy(self._hooks_join_group[group_id])
-                self._watchers.put(
+                self._watchers.append(
                     lambda: hooks.run(
                         coordination.MemberJoinedGroup(
                             group_id,
@@ -237,7 +252,7 @@ class KazooDriver(BaseZooKeeperDriver):
                 # Copy function in case it's removed later from the
                 # hook list
                 hooks = copy.copy(self._hooks_leave_group[group_id])
-                self._watchers.put(
+                self._watchers.append(
                     lambda: hooks.run(
                         coordination.MemberLeftGroup(
                             group_id,
@@ -329,17 +344,16 @@ class KazooDriver(BaseZooKeeperDriver):
 
     def get_lock(self, name):
         return ZooKeeperLock(
+            name,
             self._coord.Lock(
                 self.paths_join(b"/", self._TOOZ_NAMESPACE, b"locks", name),
-                self._member_id.decode('ascii')))
+                self._member_id.decode('ascii')),
+            self.lock_timeout)
 
     def run_watchers(self):
         ret = []
-        while True:
-            try:
-                cb = self._watchers.get(block=False)
-            except six.moves.queue.Empty:
-                break
+        while self._watchers:
+            cb = self._watchers.popleft()
             ret.extend(cb())
 
         for group_id in six.iterkeys(self._hooks_elected_leader):
@@ -353,55 +367,14 @@ class KazooDriver(BaseZooKeeperDriver):
         return ret
 
 
-class ZakeDriver(BaseZooKeeperDriver):
-    """The driver using the Zake client which mimic a fake Kazoo client
-    without the need of real ZooKeeper servers.
-    """
-
-    fake_storage = zake.fake_storage.FakeStorage(threading.RLock())
-
-    def __init__(self, member_id, parsed_url, options):
-        super(ZakeDriver, self).__init__(member_id, parsed_url, options)
-        self._coord = zake.fake_client.FakeClient(storage=self.fake_storage)
-
-    @staticmethod
-    def watch_join_group(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def unwatch_join_group(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def watch_leave_group(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def unwatch_leave_group(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def watch_elected_as_leader(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def unwatch_elected_as_leader(group_id, callback):
-        raise NotImplementedError
-
-    @staticmethod
-    def run_watchers():
-        raise NotImplementedError
-
-
 class ZooAsyncResult(coordination.CoordAsyncResult):
+    def __init__(self, kazoo_async_result, handler, **kwargs):
+        self._kazoo_async_result = kazoo_async_result
+        self._handler = handler
+        self._kwargs = kwargs
 
-    def __init__(self, kazooAsyncResult, handler, **kwargs):
-        self.kazooAsyncResult = kazooAsyncResult
-        self.handler = handler
-        self.kwargs = kwargs
-
-    def get(self, timeout=15):
-        return self.handler(self.kazooAsyncResult, timeout, **self.kwargs)
+    def get(self, timeout=10):
+        return self._handler(self._kazoo_async_result, timeout, **self._kwargs)
 
     def done(self):
-        return self.kazooAsyncResult.ready()
+        return self._kazoo_async_result.ready()

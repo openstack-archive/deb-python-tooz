@@ -1,6 +1,6 @@
-=====================
+=======================
  Creating A Coordinator
-=====================
+=======================
 
 The principal object provided by tooz is the *coordinator*. It allows you to
 use various features, such as group membership, leader election or
@@ -12,7 +12,7 @@ driver you want it to use. Different drivers may provide different set of
 capabilities.
 
 If a driver does not support a feature, it will raise a
-:class:`~NotImplementedError` exception.
+:class:`~tooz.NotImplemented` exception.
 
 This example program loads a basic coordinataor using the ZooKeeper based
 driver.

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-#
-#    Copyright (C) 2014 eNovance Inc. All Rights Reserved.
+
+#    Copyright (C) 2014 Yahoo! Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,6 +14,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import six
 
-class NotImplemented(NotImplementedError):
-    pass
+
+def exception_message(exc):
+    """Return the string representation of exception."""
+    try:
+        return six.text_type(exc)
+    except UnicodeError:
+        return str(exc)

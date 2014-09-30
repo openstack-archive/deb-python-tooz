@@ -17,6 +17,7 @@
 # under the License.
 
 import collections
+import logging
 
 import msgpack
 import pymemcache.client
@@ -25,6 +26,10 @@ import six
 
 from tooz import coordination
 from tooz import locking
+from tooz import utils
+
+
+LOG = logging.getLogger(__name__)
 
 
 class Retry(Exception):
@@ -45,8 +50,8 @@ class MemcachedLock(locking.Lock):
     _LOCK_PREFIX = b'__TOOZ_LOCK_'
 
     def __init__(self, coord, name, timeout):
+        super(MemcachedLock, self).__init__(self._LOCK_PREFIX + name)
         self.coord = coord
-        self.name = self._LOCK_PREFIX + name
         self.timeout = timeout
 
     @retry
@@ -63,13 +68,23 @@ class MemcachedLock(locking.Lock):
         raise Retry
 
     def release(self):
-        self.coord._acquired_locks.remove(self)
-        self.coord.client.delete(self.name)
+        if self.coord.client.delete(self.name, noreply=False):
+            self.coord._acquired_locks.remove(self)
+            return True
+        else:
+            return False
 
     def heartbeat(self):
         """Keep the lock alive."""
-        self.coord.client.touch(self.name,
-                                expire=self.timeout)
+        poked = self.coord.client.touch(self.name,
+                                        expire=self.timeout,
+                                        noreply=False)
+        if not poked:
+            LOG.warn("Unable to heartbeat by updating key '%s' with extended"
+                     " expiry of %s seconds", self.name, self.timeout)
+
+    def get_owner(self):
+        return self.coord.client.get(self.name)
 
 
 class MemcachedDriver(coordination.CoordinationDriver):
@@ -117,18 +132,17 @@ class MemcachedDriver(coordination.CoordinationDriver):
                 timeout=self.timeout,
                 connect_timeout=self.timeout)
         except Exception as e:
-            raise coordination.ToozConnectionError(e)
+            raise coordination.ToozConnectionError(utils.exception_message(e))
         self._group_members = collections.defaultdict(set)
         self._acquired_locks = []
         self.heartbeat()
 
     def stop(self):
+        for lock in list(self._acquired_locks):
+            lock.release()
+
         self.client.delete(self._encode_member_id(self._member_id))
         map(self.leave_group, list(self._groups))
-
-        for group_id in six.iterkeys(self._hooks_elected_leader):
-            if self.get_leader(group_id).get() == self._member_id:
-                self.client.delete(self._encode_group_leader(group_id))
 
         self.client.close()
 
@@ -255,7 +269,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
 
     def get_leader(self, group_id):
         return MemcachedAsyncResult(
-            self.client.get(self._encode_group_leader(group_id)))
+            self._get_leader_lock(group_id).get_owner())
 
     def heartbeat(self):
         self.client.set(self._encode_member_id(self._member_id),
@@ -264,11 +278,6 @@ class MemcachedDriver(coordination.CoordinationDriver):
         # Reset the acquired locks
         for lock in self._acquired_locks:
             lock.heartbeat()
-
-        for group_id in six.iterkeys(self._hooks_elected_leader):
-            if self.get_leader(group_id).get() == self._member_id:
-                self.client.touch(self._encode_group_leader(group_id),
-                                  expire=self.leader_timeout)
 
     def _init_watch_group(self, group_id):
         members = self.client.get(self._encode_group_id(group_id))
@@ -307,6 +316,10 @@ class MemcachedDriver(coordination.CoordinationDriver):
     def get_lock(self, name):
         return MemcachedLock(self, name, self.lock_timeout)
 
+    def _get_leader_lock(self, group_id):
+        return MemcachedLock(self, self._encode_group_leader(group_id),
+                             self.leader_timeout)
+
     def run_watchers(self):
         result = []
         for group_id in self.client.get(self._GROUP_LIST_KEY):
@@ -328,18 +341,14 @@ class MemcachedDriver(coordination.CoordinationDriver):
 
             self._group_members[group_id] = group_members
 
-        for group_id in six.iterkeys(self._hooks_elected_leader):
-            lock_id = self._encode_group_leader(group_id)
+        for group_id, hooks in six.iteritems(self._hooks_elected_leader):
             # Try to grab the lock, if that fails, that means someone has it
             # already.
-            if self.client.add(lock_id, self._member_id,
-                               expire=self.leader_timeout,
-                               noreply=False):
+            if self._get_leader_lock(group_id).acquire(blocking=False):
                 # We got the lock
-                self._hooks_elected_leader[group_id].run(
-                    coordination.LeaderElected(
-                        group_id,
-                        self._member_id))
+                hooks.run(coordination.LeaderElected(
+                    group_id,
+                    self._member_id))
 
         return result
 
@@ -352,10 +361,10 @@ class MemcachedAsyncResult(coordination.CoordAsyncResult):
 
     """
     def __init__(self, result):
-        self.result = result
+        self._result = result
 
     def get(self, timeout=0):
-        return self.result
+        return self._result
 
     @staticmethod
     def done():
@@ -370,10 +379,10 @@ class MemcachedAsyncError(coordination.CoordAsyncResult):
 
     """
     def __init__(self, error):
-        self.error = error
+        self._error = error
 
-    def get(self, timeout=0):
-        raise self.error
+    def get(self, timeout=10):
+        raise self._error
 
     @staticmethod
     def done():
