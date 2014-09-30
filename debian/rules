@@ -45,7 +45,7 @@ endif
 
 override_dh_clean:
 	dh_clean -O--buildsystem=python_distutils
-	rm -rf build TEST_PID_MEMCACHE.pid
+	rm -rf build TEST_PID_MEMCACHE.pid .testrepository
 
 override_dh_sphinxdoc:
 	sphinx-build -b html doc/source debian/python-tooz-doc/usr/share/doc/python-tooz-doc/html
