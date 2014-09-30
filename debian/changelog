@@ -1,6 +1,7 @@
 python-tooz (0.4-1) unstable; urgency=medium
 
   * New upstream release.
+  * Replaced (build-)depends of python-posix-ipc by python-sysv-ipc.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 30 Sep 2014 08:52:36 +0000
 
