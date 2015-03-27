@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-#    Copyright © 2013-2014 eNovance Inc. All Rights Reserved.
+#    Copyright © 2013-2015 eNovance Inc. All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,10 +13,12 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import os
 import time
 import uuid
 
 import testscenarios
+from testtools import matchers
 from testtools import testcase
 
 import tooz.coordination
@@ -27,26 +29,57 @@ class TestAPI(testscenarios.TestWithScenarios,
               tests.TestCaseSkipNotImplemented):
 
     scenarios = [
-        ('zookeeper', {'url': 'kazoo://127.0.0.1:2181?timeout=5'}),
+        ('kazoo', {'url': os.getenv("TOOZ_TEST_ZOOKEEPER_URL"),
+                   'bad_url': 'kazoo://localhost:1'}),
         ('zake', {'url': 'zake://?timeout=5'}),
-        ('memcached', {'url': 'memcached://?timeout=5'}),
+        ('memcached', {'url': os.getenv("TOOZ_TEST_MEMCACHED_URL"),
+                       'bad_url': 'memcached://localhost:1',
+                       'timeout_capable': True}),
         ('ipc', {'url': 'ipc://'}),
+        ('file', {'url': 'file:///tmp'}),
+        ('redis', {'url': os.getenv("TOOZ_TEST_REDIS_URL"),
+                   'bad_url': 'redis://localhost:1',
+                   'timeout_capable': True}),
+        ('postgresql', {'url': os.getenv("TOOZ_TEST_PGSQL_URL"),
+                        'bad_url': 'postgresql://localhost:1'}),
+        ('mysql', {'url': os.getenv("TOOZ_TEST_MYSQL_URL"),
+                   'bad_url': 'mysql://localhost:1'}),
     ]
+
+    def assertRaisesAny(self, exc_classes, callable_obj, *args, **kwargs):
+        checkers = [matchers.MatchesException(exc_class)
+                    for exc_class in exc_classes]
+        matcher = matchers.Raises(matchers.MatchesAny(*checkers))
+        callable_obj = testcase.Nullary(callable_obj, *args, **kwargs)
+        self.assertThat(callable_obj, matcher)
 
     def setUp(self):
         super(TestAPI, self).setUp()
+        if self.url is None:
+            self.skipTest("No URL set for this driver")
         self.group_id = self._get_random_uuid()
         self.member_id = self._get_random_uuid()
         self._coord = tooz.coordination.get_coordinator(self.url,
                                                         self.member_id)
-        try:
-            self._coord.start()
-        except tooz.coordination.ToozConnectionError as e:
-            raise testcase.TestSkipped(str(e))
+        self._coord.start()
 
     def tearDown(self):
         self._coord.stop()
         super(TestAPI, self).tearDown()
+
+    def test_connection_error(self):
+        if not hasattr(self, "bad_url"):
+            raise testcase.TestSkipped("No bad URL provided")
+        coord = tooz.coordination.get_coordinator(self.bad_url,
+                                                  self.member_id)
+        self.assertRaises(tooz.coordination.ToozConnectionError,
+                          coord.start)
+
+    def test_stop_first(self):
+        c = tooz.coordination.get_coordinator(self.url,
+                                              self.member_id)
+        self.assertRaises(tooz.coordination.ToozError,
+                          c.stop)
 
     def test_create_group(self):
         self._coord.create_group(self.group_id).get()
@@ -67,6 +100,31 @@ class TestAPI(testscenarios.TestWithScenarios,
         for group_id in groups_ids:
             self.assertTrue(group_id in created_groups)
 
+    def test_delete_group(self):
+        self._coord.create_group(self.group_id).get()
+        all_group_ids = self._coord.get_groups().get()
+        self.assertTrue(self.group_id in all_group_ids)
+        self._coord.delete_group(self.group_id).get()
+        all_group_ids = self._coord.get_groups().get()
+        self.assertFalse(self.group_id in all_group_ids)
+        join_group = self._coord.join_group(self.group_id)
+        self.assertRaises(tooz.coordination.GroupNotCreated,
+                          join_group.get)
+
+    def test_delete_group_non_existent(self):
+        delete = self._coord.delete_group(self.group_id)
+        self.assertRaises(tooz.coordination.GroupNotCreated,
+                          delete.get)
+
+    def test_delete_group_non_empty(self):
+        self._coord.create_group(self.group_id).get()
+        self._coord.join_group(self.group_id).get()
+        delete = self._coord.delete_group(self.group_id)
+        self.assertRaises(tooz.coordination.GroupNotEmpty,
+                          delete.get)
+        self._coord.leave_group(self.group_id)
+        self._coord.delete_group(self.group_id).get()
+
     def test_join_group(self):
         self._coord.create_group(self.group_id).get()
         self._coord.join_group(self.group_id).get()
@@ -74,8 +132,7 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertTrue(self.member_id in member_list)
 
     def test_join_nonexistent_group(self):
-        group_id_test = self._get_random_uuid()
-        join_group = self._coord.join_group(group_id_test)
+        join_group = self._coord.join_group(self.group_id)
         self.assertRaises(tooz.coordination.GroupNotCreated,
                           join_group.get)
 
@@ -107,14 +164,10 @@ class TestAPI(testscenarios.TestWithScenarios,
         all_group_ids = self._coord.get_groups().get()
         self.assertTrue(self.group_id not in all_group_ids)
         leave_group = self._coord.leave_group(self.group_id)
-        try:
-            leave_group.get()
         # Drivers raise one of those depending on their capability
-        except (tooz.coordination.MemberNotJoined,
-                tooz.coordination.GroupNotCreated):
-            pass
-        else:
-            self.fail("Exception not raised")
+        self.assertRaisesAny([tooz.coordination.MemberNotJoined,
+                              tooz.coordination.GroupNotCreated],
+                             leave_group.get)
 
     def test_leave_group_not_joined_by_member(self):
         self._coord.create_group(self.group_id).get()
@@ -146,17 +199,24 @@ class TestAPI(testscenarios.TestWithScenarios,
                                                    self.member_id).get()
         self.assertEqual(capa, b"test_capabilities")
 
+    def test_get_member_capabilities_complex(self):
+        self._coord.create_group(self.group_id).get()
+        caps = {
+            'type': 'warrior',
+            'abilities': ['fight', 'flight', 'double-hit-damage'],
+        }
+        self._coord.join_group(self.group_id, caps)
+        capa = self._coord.get_member_capabilities(self.group_id,
+                                                   self.member_id).get()
+        self.assertEqual(capa, caps)
+
     def test_get_member_capabilities_nonexistent_group(self):
         capa = self._coord.get_member_capabilities(self.group_id,
                                                    self.member_id)
-        try:
-            capa.get()
         # Drivers raise one of those depending on their capability
-        except (tooz.coordination.MemberNotJoined,
-                tooz.coordination.GroupNotCreated):
-            pass
-        else:
-            self.fail("Exception not raised")
+        self.assertRaisesAny([tooz.coordination.MemberNotJoined,
+                              tooz.coordination.GroupNotCreated],
+                             capa.get)
 
     def test_get_member_capabilities_nonjoined_member(self):
         self._coord.create_group(self.group_id).get()
@@ -182,21 +242,15 @@ class TestAPI(testscenarios.TestWithScenarios,
     def test_update_capabilities_with_group_id_nonexistent(self):
         update_cap = self._coord.update_capabilities(self.group_id,
                                                      b'test_capabilities')
-        try:
-            update_cap.get()
         # Drivers raise one of those depending on their capability
-        except (tooz.coordination.MemberNotJoined,
-                tooz.coordination.GroupNotCreated):
-            pass
-        else:
-            self.fail("Exception not raised")
+        self.assertRaisesAny([tooz.coordination.MemberNotJoined,
+                              tooz.coordination.GroupNotCreated],
+                             update_cap.get)
 
     def test_heartbeat(self):
         self._coord.heartbeat()
 
     def test_disconnect_leave_group(self):
-        if self.url.startswith('zake://'):
-            self.skipTest("Zake has a bug that prevent this test from working")
         member_id_test2 = self._get_random_uuid()
         client2 = tooz.coordination.get_coordinator(self.url,
                                                     member_id_test2)
@@ -213,8 +267,8 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertTrue(member_id_test2 not in members_ids)
 
     def test_timeout(self):
-        if not self.url.startswith('memcached://'):
-            self.skipTest("This test only works with memcached for now")
+        if not getattr(self, "timeout_capable", False):
+            self.skipTest("This test only works with timeout capable drivers")
         member_id_test2 = self._get_random_uuid()
         client2 = tooz.coordination.get_coordinator(self.url,
                                                     member_id_test2)
@@ -225,12 +279,30 @@ class TestAPI(testscenarios.TestWithScenarios,
         members_ids = self._coord.get_members(self.group_id).get()
         self.assertTrue(self.member_id in members_ids)
         self.assertTrue(member_id_test2 in members_ids)
+
+        # Watch the group, we want to be sure that when client2 is kicked out
+        # we get an event.
+        self._coord.watch_leave_group(self.group_id, self._set_event)
+
         time.sleep(3)
         self._coord.heartbeat()
         time.sleep(3)
+
+        # Now client2 has timed out!
+
         members_ids = self._coord.get_members(self.group_id).get()
+        while True:
+            if self._coord.run_watchers():
+                break
         self.assertTrue(self.member_id in members_ids)
         self.assertTrue(member_id_test2 not in members_ids)
+        # Check that the event has been triggered
+        self.assertIsInstance(self.event,
+                              tooz.coordination.MemberLeftGroup)
+        self.assertEqual(member_id_test2,
+                         self.event.member_id)
+        self.assertEqual(self.group_id,
+                         self.event.group_id)
 
     def _set_event(self, event):
         self.event = event
@@ -313,12 +385,72 @@ class TestAPI(testscenarios.TestWithScenarios,
         self._coord.run_watchers()
         self.assertIsNone(self.event)
 
+    def test_watch_join_group_disappear(self):
+        if not hasattr(self._coord, '_destroy_group'):
+            self.skipTest("This test only works with coordinators"
+                          " that have the ability to destroy groups.")
+
+        self._coord.create_group(self.group_id).get()
+        self._coord.watch_join_group(self.group_id, self._set_event)
+        self._coord.watch_leave_group(self.group_id, self._set_event)
+
+        member_id_test2 = self._get_random_uuid()
+        client2 = tooz.coordination.get_coordinator(self.url,
+                                                    member_id_test2)
+        client2.start()
+        client2.join_group(self.group_id).get()
+
+        while True:
+            if self._coord.run_watchers():
+                break
+        self.assertIsInstance(self.event,
+                              tooz.coordination.MemberJoinedGroup)
+        self.event = None
+
+        # Force the group to disappear...
+        self._coord._destroy_group(self.group_id)
+
+        while True:
+            if self._coord.run_watchers():
+                break
+
+        self.assertIsInstance(self.event,
+                              tooz.coordination.MemberLeftGroup)
+
     def test_watch_join_group_non_existent(self):
         self.assertRaises(tooz.coordination.GroupNotCreated,
                           self._coord.watch_join_group,
                           self.group_id,
                           lambda: None)
         self.assertEqual(0, len(self._coord._hooks_join_group[self.group_id]))
+
+    def test_watch_join_group_booted_out(self):
+        self._coord.create_group(self.group_id).get()
+        self._coord.join_group(self.group_id).get()
+        self._coord.watch_join_group(self.group_id, self._set_event)
+        self._coord.watch_leave_group(self.group_id, self._set_event)
+
+        member_id_test2 = self._get_random_uuid()
+        client2 = tooz.coordination.get_coordinator(self.url,
+                                                    member_id_test2)
+        client2.start()
+        client2.join_group(self.group_id).get()
+
+        while True:
+            if self._coord.run_watchers():
+                break
+
+        client3 = tooz.coordination.get_coordinator(self.url, self.member_id)
+        client3.start()
+        client3.leave_group(self.group_id).get()
+
+        # Only works for clients that have access to the groups they are part
+        # of, to ensure that after we got booted out by client3 that this
+        # client now no longer believes its part of the group.
+        if hasattr(self._coord, '_joined_groups'):
+            self.assertIn(self.group_id, self._coord._joined_groups)
+            self._coord.run_watchers()
+            self.assertNotIn(self.group_id, self._coord._joined_groups)
 
     def test_watch_leave_group_non_existent(self):
         self.assertRaises(tooz.coordination.GroupNotCreated,
@@ -373,6 +505,9 @@ class TestAPI(testscenarios.TestWithScenarios,
                          self.event.group_id)
         self.assertEqual(client2.get_leader(self.group_id).get(),
                          member_id_test2)
+
+        # Restart the coord because tearDown stops it
+        self._coord.start()
 
     def test_get_leader(self):
         self._coord.create_group(self.group_id).get()
@@ -437,11 +572,35 @@ class TestAPI(testscenarios.TestWithScenarios,
 
     def test_get_lock(self):
         lock = self._coord.get_lock(self._get_random_uuid())
-        self.addCleanup(lock.destroy)
         self.assertEqual(True, lock.acquire())
         lock.release()
         with lock:
             pass
+
+    def test_get_multiple_locks_with_same_coord(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        self.assertEqual(True, lock1.acquire())
+        self.assertEqual(False, lock2.acquire(blocking=False))
+        self.assertEqual(False,
+                         self._coord.get_lock(name).acquire(blocking=False))
+        lock1.release()
+
+    def test_get_multiple_locks_with_same_coord_without_ref(self):
+        # NOTE(sileht): weird test case who want a lock that can't be
+        # released ? This tests is here to ensure that the
+        # acquired first lock in not vanished by the gc and get accidentally
+        # released.
+        # This test ensures that the consumer application will stuck when it
+        # looses the ref of a acquired lock instead of create a race.
+        # Also, by its nature this tests don't cleanup the created
+        # semaphore by the ipc:// driver, don't close opened files and
+        # sql connections and that the desired behavior.
+        name = self._get_random_uuid()
+        self.assertEqual(True, self._coord.get_lock(name).acquire())
+        self.assertEqual(False,
+                         self._coord.get_lock(name).acquire(blocking=False))
 
     def test_get_lock_multiple_coords(self):
         member_id2 = self._get_random_uuid()
@@ -451,14 +610,13 @@ class TestAPI(testscenarios.TestWithScenarios,
 
         lock_name = self._get_random_uuid()
         lock = self._coord.get_lock(lock_name)
-        self.addCleanup(lock.destroy)
         self.assertEqual(True, lock.acquire())
 
         lock2 = client2.get_lock(lock_name)
-        self.addCleanup(lock2.destroy)
         self.assertEqual(False, lock2.acquire(blocking=False))
         lock.release()
         self.assertEqual(True, lock2.acquire(blocking=True))
+        lock2.release()
 
     @staticmethod
     def _get_random_uuid():
