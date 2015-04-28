@@ -1,6 +1,8 @@
 python-tooz (0.13.1-2) unstable; urgency=medium
 
   * Uploading to unstable.
+  * Running tests with MySQL server.
+  * Sets homepage.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 28 Apr 2015 15:21:53 +0000
 
