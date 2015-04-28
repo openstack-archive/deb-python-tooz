@@ -14,6 +14,9 @@ clean_exit () {
 
     # Shutdown of memcached
     kill $MEMCACHED_PID
+
+    # Shutdown of redis
+    kill $REDIS_SERVER_PID
 }
 
 wait_for_line () {
@@ -52,6 +55,10 @@ export TOOZ_TEST_PGSQL_URL="postgresql:///?host=${PGSQL_DATA}&port=${PGSQL_PORT}
 # Start memcached
 memcached -p 11212 & MEMCACHED_PID=$!
 export TOOZ_TEST_MEMCACHED_URL="memcached://localhost:11212?timeout=5"
+
+# Start redis
+redis-server --port 6380 & REDIS_SERVER_PID=$!
+export TOOZ_TEST_REDIS_URL="redis://localhost:6380?timeout=5"
 
 # Yield execution to venv command
 $*
