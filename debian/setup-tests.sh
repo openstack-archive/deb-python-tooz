@@ -11,6 +11,9 @@ clean_exit () {
     kill $(jobs -p)
     rm -rf ${MYSQL_DATA}
     return $error_code
+
+    # Shutdown of memcached
+    kill $MEMCACHED_PID
 }
 
 wait_for_line () {
@@ -45,6 +48,10 @@ ${PGSQL_PATH}/initdb ${PGSQL_DATA}
 ${PGSQL_PATH}/pg_ctl -w -D ${PGSQL_DATA} -o "-k ${PGSQL_DATA} -p ${PGSQL_PORT}" start
 # Wait for PostgreSQL to start listening to connections
 export TOOZ_TEST_PGSQL_URL="postgresql:///?host=${PGSQL_DATA}&port=${PGSQL_PORT}&dbname=template1"
+
+# Start memcached
+memcached -p 11212 & MEMCACHED_PID=$!
+export TOOZ_TEST_MEMCACHED_URL="memcached://localhost:11212?timeout=5"
 
 # Yield execution to venv command
 $*
