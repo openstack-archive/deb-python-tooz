@@ -1,3 +1,9 @@
+python-tooz (0.13.1-2) unstable; urgency=medium
+
+  * Do not test using redis-server: it seems there's issues with it.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 06 May 2015 11:02:28 +0200
+
 python-tooz (0.13.1-1) unstable; urgency=medium
 
   * New upstream release.

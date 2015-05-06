@@ -16,7 +16,7 @@ clean_exit () {
     kill $MEMCACHED_PID
 
     # Shutdown of redis
-    kill $REDIS_SERVER_PID
+#    kill $REDIS_SERVER_PID
 }
 
 wait_for_line () {
@@ -57,8 +57,8 @@ memcached -p 11212 & MEMCACHED_PID=$!
 export TOOZ_TEST_MEMCACHED_URL="memcached://localhost:11212?timeout=5"
 
 # Start redis
-redis-server --port 6380 & REDIS_SERVER_PID=$!
-export TOOZ_TEST_REDIS_URL="redis://localhost:6380?timeout=5"
+#redis-server --port 6380 & REDIS_SERVER_PID=$!
+#export TOOZ_TEST_REDIS_URL="redis://localhost:6380?timeout=5"
 
 # Yield execution to venv command
 $*
