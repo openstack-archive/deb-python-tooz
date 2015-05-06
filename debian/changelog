@@ -1,20 +1,14 @@
-python-tooz (0.13.1-2) unstable; urgency=medium
+python-tooz (0.13.1-1) unstable; urgency=medium
 
-  * Uploading to unstable.
+  * New upstream release.
+  * Fixed (build-)depends for this release.
+  * Reworked the way to run unit tests.
   * Running tests with MySQL and PGSQL server.
   * Also runs memcached tests.
   * Also runs redis-server tests.
   * Sets homepage.
 
- -- Thomas Goirand <zigo@debian.org>  Tue, 28 Apr 2015 15:21:53 +0000
-
-python-tooz (0.13.1-1) experimental; urgency=medium
-
-  * New upstream release.
-  * Fixed (build-)depends for this release.
-  * Reworked the way to run unit tests.
-
- -- Thomas Goirand <zigo@debian.org>  Fri, 27 Mar 2015 19:04:19 +0100
+ -- Thomas Goirand <zigo@debian.org>  Wed, 06 May 2015 07:30:13 +0000
 
 python-tooz (0.4-1) unstable; urgency=medium
 
