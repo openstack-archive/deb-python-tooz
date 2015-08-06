@@ -16,6 +16,7 @@
 
 import contextlib
 import hashlib
+import logging
 
 import psycopg2
 import six
@@ -26,6 +27,7 @@ from tooz.drivers import _retry
 from tooz import locking
 from tooz import utils
 
+LOG = logging.getLogger(__name__)
 
 # See: psycopg/diagnostics_type.c for what kind of fields these
 # objects may have (things like 'schema_name', 'internal_query'
@@ -81,7 +83,9 @@ def _translating_cursor(conn):
         with conn.cursor() as cur:
             yield cur
     except psycopg2.Error as e:
-        raise coordination.ToozError(_format_exception(e))
+        coordination.raise_with_cause(coordination.ToozError,
+                                      _format_exception(e),
+                                      cause=e)
 
 
 class PostgresLock(locking.Lock):
@@ -90,6 +94,7 @@ class PostgresLock(locking.Lock):
     def __init__(self, name, parsed_url, options):
         super(PostgresLock, self).__init__(name)
         self._conn = PostgresDriver.get_connection(parsed_url, options)
+        self.acquired = False
         h = hashlib.md5()
         h.update(name)
         if six.PY2:
@@ -98,40 +103,68 @@ class PostgresLock(locking.Lock):
             self.key = h.digest()[0:2]
 
     def acquire(self, blocking=True):
-        if blocking is True:
+
+        @_retry.retry(stop_max_delay=blocking)
+        def _lock():
+            # NOTE(sileht) One the same session the lock is not exclusive
+            # so we track it internally if the process already has the lock.
+            if self.acquired is True:
+                if blocking:
+                    raise _retry.Retry
+                return False
+
             with _translating_cursor(self._conn) as cur:
-                cur.execute("SELECT pg_advisory_lock(%s, %s);", self.key)
-                return True
-        elif blocking is False:
-            with _translating_cursor(self._conn) as cur:
-                cur.execute("SELECT pg_try_advisory_lock(%s, %s);", self.key)
-                return cur.fetchone()[0]
-        else:
-            def _acquire():
-                with _translating_cursor(self._conn) as cur:
+                if blocking is True:
+                    cur.execute("SELECT pg_advisory_lock(%s, %s);", self.key)
+                    cur.fetchone()
+                    self.acquired = True
+                    return True
+                else:
                     cur.execute("SELECT pg_try_advisory_lock(%s, %s);",
                                 self.key)
                     if cur.fetchone()[0] is True:
+                        self.acquired = True
                         return True
-                    raise _retry.Retry
-            kwargs = _retry.RETRYING_KWARGS.copy()
-            kwargs['stop_max_delay'] = blocking
-            return _retry.Retrying(**kwargs).call(_acquire)
+                    elif blocking is False:
+                        return False
+                    else:
+                        raise _retry.Retry
+
+        kwargs = _retry.RETRYING_KWARGS.copy()
+        kwargs['stop_max_delay'] = blocking
+        return _lock()
 
     def release(self):
+        if not self.acquired:
+            return False
         with _translating_cursor(self._conn) as cur:
-            cur.execute("SELECT pg_advisory_unlock(%s, %s);", self.key)
-            return cur.fetchone()[0]
+            cur.execute("SELECT pg_advisory_unlock(%s, %s);",
+                        self.key)
+            cur.fetchone()
+            self.acquired = False
+            return True
+
+    def __del__(self):
+        if self.acquired:
+            LOG.warn("unreleased lock %s garbage collected" % self.name)
 
 
 class PostgresDriver(coordination.CoordinationDriver):
-    """A PostgreSQL based driver."""
+    """A `PostgreSQL`_ based driver.
+
+    This driver users `PostgreSQL`_ database tables to
+    provide the coordination driver semantics and required API(s). It **is**
+    missing some functionality but in the future these not implemented API(s)
+    will be filled in.
+
+    .. _PostgreSQL: http://www.postgresql.org/
+    """
 
     def __init__(self, member_id, parsed_url, options):
         """Initialize the PostgreSQL driver."""
         super(PostgresDriver, self).__init__()
         self._parsed_url = parsed_url
-        self._options = options
+        self._options = utils.collapse(options)
 
     def _start(self):
         self._conn = PostgresDriver.get_connection(self._parsed_url,
@@ -141,9 +174,7 @@ class PostgresDriver(coordination.CoordinationDriver):
         self._conn.close()
 
     def get_lock(self, name):
-        return locking.WeakLockHelper(
-            self._parsed_url.geturl(),
-            PostgresLock, name, self._parsed_url, self._options)
+        return PostgresLock(name, self._parsed_url, self._options)
 
     @staticmethod
     def watch_join_group(group_id, callback):
@@ -171,9 +202,9 @@ class PostgresDriver(coordination.CoordinationDriver):
 
     @staticmethod
     def get_connection(parsed_url, options):
-        host = options.get("host", [None])[-1]
-        port = parsed_url.port or options.get("port", [None])[-1]
-        dbname = parsed_url.path[1:] or options.get("dbname", [None])[-1]
+        host = options.get("host")
+        port = parsed_url.port or options.get("port")
+        dbname = parsed_url.path[1:] or options.get("dbname")
         username = parsed_url.username
         password = parsed_url.password
 
@@ -184,4 +215,6 @@ class PostgresDriver(coordination.CoordinationDriver):
                                     password=password,
                                     database=dbname)
         except psycopg2.Error as e:
-            raise coordination.ToozConnectionError(_format_exception(e))
+            coordination.raise_with_cause(coordination.ToozConnectionError,
+                                          _format_exception(e),
+                                          cause=e)

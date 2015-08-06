@@ -17,7 +17,9 @@
 import abc
 import collections
 
+from oslo_utils import excutils
 from oslo_utils import netutils
+from oslo_utils import timeutils
 import six
 from stevedore import driver
 
@@ -75,7 +77,7 @@ class CoordinationDriver(object):
                 + len(self._hooks_leave_group[group_id]))
 
     @staticmethod
-    def run_watchers():
+    def run_watchers(timeout=None):
         """Run the watchers callback."""
         raise tooz.NotImplemented
 
@@ -159,8 +161,8 @@ class CoordinationDriver(object):
 
         """
         self._hooks_elected_leader[group_id].remove(callback)
-        if not self._hooks.elected_leader[group_id]:
-            del self._hooks.elected_leader[group_id]
+        if not self._hooks_elected_leader[group_id]:
+            del self._hooks_elected_leader[group_id]
 
     @staticmethod
     def stand_down_group_leader(group_id):
@@ -169,6 +171,10 @@ class CoordinationDriver(object):
         :param group_id: The group where we don't want to be a leader anymore
         """
         raise tooz.NotImplemented
+
+    @property
+    def is_started(self):
+        return self._started
 
     def start(self):
         """Start the service engine.
@@ -305,6 +311,9 @@ class CoordinationDriver(object):
     def get_lock(name):
         """Return a distributed lock.
 
+        This is a exclusive lock, a second call to acquire() will block or
+        return False.
+
         :param name: The lock name that is used to identify it across all
                      nodes.
 
@@ -340,6 +349,39 @@ class CoordAsyncResult(object):
         """Returns True if the task is done, False otherwise."""
 
 
+class _RunWatchersMixin(object):
+    """Mixin to share the *mostly* common ``run_watchers`` implementation."""
+
+    def run_watchers(self, timeout=None):
+        with timeutils.StopWatch(duration=timeout) as w:
+            known_groups = self.get_groups().get(
+                timeout=w.leftover(return_none=True))
+            result = []
+            for group_id in known_groups:
+                try:
+                    group_members_fut = self.get_members(group_id)
+                    group_members = group_members_fut.get(
+                        timeout=w.leftover(return_none=True))
+                except GroupNotCreated:
+                    group_members = set()
+                else:
+                    group_members = set(group_members)
+                if (group_id in self._joined_groups and
+                        self._member_id not in group_members):
+                    self._joined_groups.discard(group_id)
+                old_group_members = self._group_members.get(group_id, set())
+                for member_id in (group_members - old_group_members):
+                    result.extend(
+                        self._hooks_join_group[group_id].run(
+                            MemberJoinedGroup(group_id, member_id)))
+                for member_id in (old_group_members - group_members):
+                    result.extend(
+                        self._hooks_leave_group[group_id].run(
+                            MemberLeftGroup(group_id, member_id)))
+                self._group_members[group_id] = group_members
+            return result
+
+
 def get_coordinator(backend_url, member_id, **kwargs):
     """Initialize and load the backend.
 
@@ -372,7 +414,16 @@ def get_coordinator(backend_url, member_id, **kwargs):
 class ToozError(Exception):
     """Exception raised when an internal error occurs, for instance in
     case of server internal error.
+
+    :ivar cause: the cause of the exception being raised, when not none this
+                 will itself be an exception instance, this is useful for
+                 creating a chain of exceptions for versions of python where
+                 this is not yet implemented/supported natively.
     """
+
+    def __init__(self, message, cause=None):
+        super(ToozError, self).__init__(message)
+        self.cause = cause
 
 
 class ToozConnectionError(ToozError):
@@ -383,6 +434,10 @@ class ToozConnectionError(ToozError):
 
 class OperationTimedOut(ToozError):
     """Exception raised when an operation times out."""
+
+
+class LockAcquireFailed(ToozError):
+    """Exception raised when a lock acquire fails in a context manager."""
 
 
 class GroupNotCreated(ToozError):
@@ -433,3 +488,31 @@ class GroupNotEmpty(ToozError):
     def __init__(self, group_id):
         self.group_id = group_id
         super(GroupNotEmpty, self).__init__("Group %s is not empty" % group_id)
+
+
+class SerializationError(ToozError):
+    "Exception raised when serialization or deserialization breaks."
+
+
+def raise_with_cause(exc_cls, message, *args, **kwargs):
+    """Helper to raise + chain exceptions (when able) and associate a *cause*.
+
+    **For internal usage only.**
+
+    NOTE(harlowja): Since in py3.x exceptions can be chained (due to
+    :pep:`3134`) we should try to raise the desired exception with the given
+    *cause*.
+
+    :param exc_cls: the :py:class:`~tooz.coordination.ToozError` class
+                    to raise.
+    :param message: the text/str message that will be passed to
+                    the exceptions constructor as its first positional
+                    argument.
+    :param args: any additional positional arguments to pass to the
+                 exceptions constructor.
+    :param kwargs: any additional keyword arguments to pass to the
+                   exceptions constructor.
+    """
+    if not issubclass(exc_cls, ToozError):
+        raise ValueError("Subclass of tooz error is required")
+    excutils.raise_with_cause(exc_cls, message, *args, **kwargs)

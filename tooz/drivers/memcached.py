@@ -15,10 +15,12 @@
 # under the License.
 
 import collections
+import errno
 import logging
+import socket
 
 from concurrent import futures
-import pymemcache.client
+from pymemcache import client as pymemcache_client
 import six
 
 from tooz import coordination
@@ -30,6 +32,39 @@ from tooz import utils
 LOG = logging.getLogger(__name__)
 
 
+def _translate_failures(func):
+    """Translates common pymemcache exceptions into tooz exceptions.
+
+    https://github.com/pinterest/pymemcache/blob/d995/pymemcache/client.py#L202
+    """
+
+    @six.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except pymemcache_client.MemcacheUnexpectedCloseError as e:
+            coordination.raise_with_cause(coordination.ToozConnectionError,
+                                          utils.exception_message(e),
+                                          cause=e)
+        except (socket.timeout, socket.error,
+                socket.gaierror, socket.herror) as e:
+            # TODO(harlowja): get upstream pymemcache to produce a better
+            # exception for these, using socket (vs. a memcache specific
+            # error) seems sorta not right and/or the best approach...
+            msg = utils.exception_message(e)
+            if e.errno is not None:
+                msg += " (with errno %s [%s])" % (errno.errorcode[e.errno],
+                                                  e.errno)
+            coordination.raise_with_cause(coordination.ToozConnectionError,
+                                          msg, cause=e)
+        except pymemcache_client.MemcacheError as e:
+            coordination.raise_with_cause(coordination.ToozError,
+                                          utils.exception_message(e),
+                                          cause=e)
+
+    return wrapper
+
+
 class MemcachedLock(locking.Lock):
     _LOCK_PREFIX = b'__TOOZ_LOCK_'
 
@@ -39,7 +74,9 @@ class MemcachedLock(locking.Lock):
         self.timeout = timeout
 
     def acquire(self, blocking=True):
+
         @_retry.retry(stop_max_delay=blocking)
+        @_translate_failures
         def _acquire():
             if self.coord.client.add(
                     self.name,
@@ -51,8 +88,10 @@ class MemcachedLock(locking.Lock):
             if blocking is False:
                 return False
             raise _retry.Retry
+
         return _acquire()
 
+    @_translate_failures
     def release(self):
         if self.coord.client.delete(self.name, noreply=False):
             self.coord._acquired_locks.remove(self)
@@ -60,6 +99,7 @@ class MemcachedLock(locking.Lock):
         else:
             return False
 
+    @_translate_failures
     def heartbeat(self):
         """Keep the lock alive."""
         poked = self.coord.client.touch(self.name,
@@ -69,33 +109,64 @@ class MemcachedLock(locking.Lock):
             LOG.warn("Unable to heartbeat by updating key '%s' with extended"
                      " expiry of %s seconds", self.name, self.timeout)
 
+    @_translate_failures
     def get_owner(self):
         return self.coord.client.get(self.name)
 
 
-class MemcachedDriver(coordination.CoordinationDriver):
-    """A memcached based driver."""
+class MemcachedDriver(coordination._RunWatchersMixin,
+                      coordination.CoordinationDriver):
+    """A `memcached`_ based driver.
 
-    _GROUP_PREFIX = b'_TOOZ_GROUP_'
-    _GROUP_LEADER_PREFIX = b'_TOOZ_GROUP_LEADER_'
-    _MEMBER_PREFIX = b'_TOOZ_MEMBER_'
-    _GROUP_LIST_KEY = b'_TOOZ_GROUP_LIST'
+    This driver users `memcached`_ concepts to provide the coordination driver
+    semantics and required API(s). It **is** fully functional and implements
+    all of the coordination driver API(s). It stores data into memcache
+    using expiries and `msgpack`_ encoded values.
+
+    .. _memcached: http://memcached.org/
+    .. _msgpack: http://msgpack.org/
+    """
+
+    #: Key prefix attached to groups (used in name-spacing keys)
+    GROUP_PREFIX = b'_TOOZ_GROUP_'
+
+    #: Key prefix attached to leaders of groups (used in name-spacing keys)
+    GROUP_LEADER_PREFIX = b'_TOOZ_GROUP_LEADER_'
+
+    #: Key prefix attached to members of groups (used in name-spacing keys)
+    MEMBER_PREFIX = b'_TOOZ_MEMBER_'
+
+    #: Key where all groups 'known' are stored.
+    GROUP_LIST_KEY = b'_TOOZ_GROUP_LIST'
+
+    #: Default socket/lock/member/leader timeout used when none is provided.
+    DEFAULT_TIMEOUT = 30
+
+    #: String used to keep a key/member alive (until it next expires).
+    STILL_ALIVE = b"It's alive!"
 
     def __init__(self, member_id, parsed_url, options):
         super(MemcachedDriver, self).__init__()
+        options = utils.collapse(options)
+        self._options = options
         self._member_id = member_id
-        self._groups = set()
-        self._executor = None
+        self._joined_groups = set()
+        self._executor = utils.ProxyExecutor.build("Memcached", options)
         self.host = (parsed_url.hostname or "localhost",
                      parsed_url.port or 11211)
-        default_timeout = options.get('timeout', ['30'])
-        self.timeout = int(default_timeout[-1])
+        default_timeout = options.get('timeout', self.DEFAULT_TIMEOUT)
+        self.timeout = int(default_timeout)
         self.membership_timeout = int(options.get(
-            'membership_timeout', default_timeout)[-1])
+            'membership_timeout', default_timeout))
         self.lock_timeout = int(options.get(
-            'lock_timeout', default_timeout)[-1])
+            'lock_timeout', default_timeout))
         self.leader_timeout = int(options.get(
-            'leader_timeout', default_timeout)[-1])
+            'leader_timeout', default_timeout))
+        max_pool_size = options.get('max_pool_size', None)
+        if max_pool_size is not None:
+            self.max_pool_size = int(max_pool_size)
+        else:
+            self.max_pool_size = None
         self._acquired_locks = []
 
     @staticmethod
@@ -110,46 +181,49 @@ class MemcachedDriver(coordination.CoordinationDriver):
             return value
         if flags == 2:
             return utils.loads(value)
-        raise Exception("Unknown serialization format '%s'" % flags)
+        raise coordination.SerializationError("Unknown serialization"
+                                              " format '%s'" % flags)
 
+    @_translate_failures
     def _start(self):
-        try:
-            self.client = pymemcache.client.Client(
-                self.host,
-                serializer=self._msgpack_serializer,
-                deserializer=self._msgpack_deserializer,
-                timeout=self.timeout,
-                connect_timeout=self.timeout)
-            # Run heartbeat here because pymemcache use a lazy connection
-            # method and only connect once you do an operation.
-            self.heartbeat()
-        except Exception as e:
-            raise coordination.ToozConnectionError(utils.exception_message(e))
+        self.client = pymemcache_client.PooledClient(
+            self.host,
+            serializer=self._msgpack_serializer,
+            deserializer=self._msgpack_deserializer,
+            timeout=self.timeout,
+            connect_timeout=self.timeout,
+            max_pool_size=self.max_pool_size)
+        # Run heartbeat here because pymemcache use a lazy connection
+        # method and only connect once you do an operation.
+        self.heartbeat()
         self._group_members = collections.defaultdict(set)
-        self._executor = futures.ThreadPoolExecutor(max_workers=1)
+        self._executor.start()
 
+    @_translate_failures
     def _stop(self):
         for lock in list(self._acquired_locks):
             lock.release()
         self.client.delete(self._encode_member_id(self._member_id))
-        for g in list(self._groups):
+        for g in list(self._joined_groups):
             try:
                 self.leave_group(g).get()
+            except (coordination.MemberNotJoined,
+                    coordination.GroupNotCreated):
+                # Guess we got booted out/never existed in the first place...
+                pass
             except coordination.ToozError:
                 LOG.warning("Unable to leave group '%s'", g, exc_info=True)
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
+        self._executor.stop()
         self.client.close()
 
     def _encode_group_id(self, group_id):
-        return self._GROUP_PREFIX + group_id
+        return self.GROUP_PREFIX + group_id
 
     def _encode_member_id(self, member_id):
-        return self._MEMBER_PREFIX + member_id
+        return self.MEMBER_PREFIX + member_id
 
     def _encode_group_leader(self, group_id):
-        return self._GROUP_LEADER_PREFIX + group_id
+        return self.GROUP_LEADER_PREFIX + group_id
 
     @_retry.retry()
     def _add_group_to_group_list(self, group_id):
@@ -157,16 +231,16 @@ class MemcachedDriver(coordination.CoordinationDriver):
 
         :param group_id: The group id
         """
-        group_list, cas = self.client.gets(self._GROUP_LIST_KEY)
+        group_list, cas = self.client.gets(self.GROUP_LIST_KEY)
         if cas:
             group_list = set(group_list)
             group_list.add(group_id)
-            if not self.client.cas(self._GROUP_LIST_KEY,
+            if not self.client.cas(self.GROUP_LIST_KEY,
                                    list(group_list), cas):
                 # Someone updated the group list before us, try again!
                 raise _retry.Retry
         else:
-            if not self.client.add(self._GROUP_LIST_KEY,
+            if not self.client.add(self.GROUP_LIST_KEY,
                                    [group_id], noreply=False):
                 # Someone updated the group list before us, try again!
                 raise _retry.Retry
@@ -177,10 +251,10 @@ class MemcachedDriver(coordination.CoordinationDriver):
 
         :param group_id: The group id
         """
-        group_list, cas = self.client.gets(self._GROUP_LIST_KEY)
+        group_list, cas = self.client.gets(self.GROUP_LIST_KEY)
         group_list = set(group_list)
         group_list.remove(group_id)
-        if not self.client.cas(self._GROUP_LIST_KEY,
+        if not self.client.cas(self.GROUP_LIST_KEY,
                                list(group_list), cas):
             # Someone updated the group list before us, try again!
             raise _retry.Retry
@@ -188,6 +262,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
     def create_group(self, group_id):
         encoded_group = self._encode_group_id(group_id)
 
+        @_translate_failures
         def _create_group():
             if not self.client.add(encoded_group, {}, noreply=False):
                 raise coordination.GroupAlreadyExist(group_id)
@@ -196,14 +271,18 @@ class MemcachedDriver(coordination.CoordinationDriver):
         return MemcachedFutureResult(self._executor.submit(_create_group))
 
     def get_groups(self):
+
+        @_translate_failures
         def _get_groups():
-            return self.client.get(self._GROUP_LIST_KEY) or []
+            return self.client.get(self.GROUP_LIST_KEY) or []
+
         return MemcachedFutureResult(self._executor.submit(_get_groups))
 
     def join_group(self, group_id, capabilities=b""):
         encoded_group = self._encode_group_id(group_id)
 
         @_retry.retry()
+        @_translate_failures
         def _join_group():
             group_members, cas = self.client.gets(encoded_group)
             if group_members is None:
@@ -217,7 +296,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
             if not self.client.cas(encoded_group, group_members, cas):
                 # It changed, let's try again
                 raise _retry.Retry
-            self._groups.add(group_id)
+            self._joined_groups.add(group_id)
 
         return MemcachedFutureResult(self._executor.submit(_join_group))
 
@@ -225,6 +304,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
         encoded_group = self._encode_group_id(group_id)
 
         @_retry.retry()
+        @_translate_failures
         def _leave_group():
             group_members, cas = self.client.gets(encoded_group)
             if group_members is None:
@@ -235,7 +315,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
             if not self.client.cas(encoded_group, group_members, cas):
                 # It changed, let's try again
                 raise _retry.Retry
-            self._groups.discard(group_id)
+            self._joined_groups.discard(group_id)
 
         return MemcachedFutureResult(self._executor.submit(_leave_group))
 
@@ -246,6 +326,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
         encoded_group = self._encode_group_id(group_id)
 
         @_retry.retry()
+        @_translate_failures
         def _delete_group():
             group_members, cas = self.client.gets(encoded_group)
             if group_members is None:
@@ -262,6 +343,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
         return MemcachedFutureResult(self._executor.submit(_delete_group))
 
     @_retry.retry()
+    @_translate_failures
     def _get_members(self, group_id):
         encoded_group = self._encode_group_id(group_id)
         group_members, cas = self.client.gets(encoded_group)
@@ -281,16 +363,20 @@ class MemcachedDriver(coordination.CoordinationDriver):
         return actual_group_members
 
     def get_members(self, group_id):
+
         def _get_members():
             return self._get_members(group_id).keys()
+
         return MemcachedFutureResult(self._executor.submit(_get_members))
 
     def get_member_capabilities(self, group_id, member_id):
+
         def _get_member_capabilities():
             group_members = self._get_members(group_id)
             if member_id not in group_members:
                 raise coordination.MemberNotJoined(group_id, member_id)
             return group_members[member_id][b'capabilities']
+
         return MemcachedFutureResult(
             self._executor.submit(_get_member_capabilities))
 
@@ -298,6 +384,7 @@ class MemcachedDriver(coordination.CoordinationDriver):
         encoded_group = self._encode_group_id(group_id)
 
         @_retry.retry()
+        @_translate_failures
         def _update_capabilities():
             group_members, cas = self.client.gets(encoded_group)
             if group_members is None:
@@ -313,18 +400,22 @@ class MemcachedDriver(coordination.CoordinationDriver):
             self._executor.submit(_update_capabilities))
 
     def get_leader(self, group_id):
+
         def _get_leader():
             return self._get_leader_lock(group_id).get_owner()
+
         return MemcachedFutureResult(self._executor.submit(_get_leader))
 
+    @_translate_failures
     def heartbeat(self):
         self.client.set(self._encode_member_id(self._member_id),
-                        "It's alive!",
+                        self.STILL_ALIVE,
                         expire=self.membership_timeout)
         # Reset the acquired locks
         for lock in self._acquired_locks:
             lock.heartbeat()
 
+    @_translate_failures
     def _init_watch_group(self, group_id):
         members = self.client.get(self._encode_group_id(group_id))
         if members is None:
@@ -366,38 +457,21 @@ class MemcachedDriver(coordination.CoordinationDriver):
         return MemcachedLock(self, self._encode_group_leader(group_id),
                              self.leader_timeout)
 
-    def run_watchers(self):
-        result = []
-        for group_id in self.client.get(self._GROUP_LIST_KEY):
-            try:
-                group_members = set(self._get_members(group_id))
-            except coordination.GroupNotCreated:
-                group_members = set()
-            old_group_members = self._group_members[group_id]
-
-            for member_id in (group_members - old_group_members):
-                result.extend(
-                    self._hooks_join_group[group_id].run(
-                        coordination.MemberJoinedGroup(group_id,
-                                                       member_id)))
-
-            for member_id in (old_group_members - group_members):
-                result.extend(
-                    self._hooks_leave_group[group_id].run(
-                        coordination.MemberLeftGroup(group_id,
-                                                     member_id)))
-
-            self._group_members[group_id] = group_members
-
+    @_translate_failures
+    def _run_leadership(self):
         for group_id, hooks in six.iteritems(self._hooks_elected_leader):
             # Try to grab the lock, if that fails, that means someone has it
             # already.
-            if self._get_leader_lock(group_id).acquire(blocking=False):
+            leader_lock = self._get_leader_lock(group_id)
+            if leader_lock.acquire(blocking=False):
                 # We got the lock
                 hooks.run(coordination.LeaderElected(
                     group_id,
                     self._member_id))
 
+    def run_watchers(self, timeout=None):
+        result = super(MemcachedDriver, self).run_watchers(timeout=timeout)
+        self._run_leadership()
         return result
 
 
@@ -410,7 +484,9 @@ class MemcachedFutureResult(coordination.CoordAsyncResult):
         try:
             return self._fut.result(timeout=timeout)
         except futures.TimeoutError as e:
-            raise coordination.OperationTimedOut(utils.exception_message(e))
+            coordination.raise_with_cause(coordination.OperationTimedOut,
+                                          utils.exception_message(e),
+                                          cause=e)
 
     def done(self):
         return self._fut.done()

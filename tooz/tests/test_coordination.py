@@ -13,16 +13,30 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
 import os
+import threading
 import time
 import uuid
 
+from concurrent import futures
+import fixtures
+import mock
 import testscenarios
 from testtools import matchers
 from testtools import testcase
 
 import tooz.coordination
 from tooz import tests
+
+
+def try_to_lock_job(name, coord, url, member_id):
+    if not coord:
+        coord = tooz.coordination.get_coordinator(
+            url, member_id)
+        coord.start()
+    lock2 = coord.get_lock(name)
+    return lock2.acquire(blocking=False)
 
 
 class TestAPI(testscenarios.TestWithScenarios,
@@ -44,6 +58,8 @@ class TestAPI(testscenarios.TestWithScenarios,
                         'bad_url': 'postgresql://localhost:1'}),
         ('mysql', {'url': os.getenv("TOOZ_TEST_MYSQL_URL"),
                    'bad_url': 'mysql://localhost:1'}),
+        ('zookeeper', {'url': os.getenv("TOOZ_TEST_ZOOKEEPER_URL"),
+                       'bad_url': 'zookeeper://localhost:1'}),
     ]
 
     def assertRaisesAny(self, exc_classes, callable_obj, *args, **kwargs):
@@ -55,6 +71,7 @@ class TestAPI(testscenarios.TestWithScenarios,
 
     def setUp(self):
         super(TestAPI, self).setUp()
+        self.useFixture(fixtures.NestedTempfile())
         if self.url is None:
             self.skipTest("No URL set for this driver")
         self.group_id = self._get_random_uuid()
@@ -570,37 +587,139 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertEqual(self.group_id,
                          self.event.group_id)
 
+    def test_unwatch_elected_as_leader(self):
+        # Create a group and add a elected_as_leader callback
+        self._coord.create_group(self.group_id).get()
+        self._coord.watch_elected_as_leader(self.group_id, self._set_event)
+
+        # Ensure exactly one leader election hook exists
+        self.assertEqual(1, len(self._coord._hooks_elected_leader))
+
+        # Unwatch, and ensure no leader election hooks exist
+        self._coord.unwatch_elected_as_leader(self.group_id, self._set_event)
+        self.assertEqual(0, len(self._coord._hooks_elected_leader))
+
     def test_get_lock(self):
         lock = self._coord.get_lock(self._get_random_uuid())
-        self.assertEqual(True, lock.acquire())
-        lock.release()
+        self.assertTrue(lock.acquire())
+        self.assertTrue(lock.release())
         with lock:
             pass
+
+    def test_get_lock_concurrency_locking_same_lock(self):
+        lock = self._coord.get_lock(self._get_random_uuid())
+
+        graceful_ending = threading.Event()
+
+        def thread():
+            self.assertTrue(lock.acquire())
+            self.assertTrue(lock.release())
+            graceful_ending.set()
+
+        t = threading.Thread(target=thread)
+        t.daemon = True
+        with lock:
+            t.start()
+            # Ensure the thread try to get the lock
+            time.sleep(.1)
+        t.join()
+        graceful_ending.wait(.2)
+        self.assertTrue(graceful_ending.is_set())
+
+    def _do_test_get_lock_concurrency_locking_two_lock(self, executor,
+                                                       use_same_coord):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        with lock1:
+            with executor(max_workers=1) as e:
+                coord = self._coord if use_same_coord else None
+                f = e.submit(try_to_lock_job, name, coord, self.url,
+                             self._get_random_uuid())
+                self.assertFalse(f.result())
+
+    def test_get_lock_concurrency_locking_two_lock_process(self):
+        self._do_test_get_lock_concurrency_locking_two_lock(
+            futures.ProcessPoolExecutor, False)
+
+    def test_get_lock_concurrency_locking_two_lock_thread1(self):
+        self._do_test_get_lock_concurrency_locking_two_lock(
+            futures.ThreadPoolExecutor, False)
+
+    def test_get_lock_concurrency_locking_two_lock_thread2(self):
+        self._do_test_get_lock_concurrency_locking_two_lock(
+            futures.ThreadPoolExecutor, True)
+
+    def test_get_lock_concurrency_locking2(self):
+        # NOTE(sileht): some database based lock can have only
+        # one lock per connection, this test ensures acquiring a
+        # second lock doesn't release the first one.
+        lock1 = self._coord.get_lock(self._get_random_uuid())
+        lock2 = self._coord.get_lock(self._get_random_uuid())
+
+        graceful_ending = threading.Event()
+        thread_locked = threading.Event()
+
+        def thread():
+            with lock2:
+                self.assertFalse(lock1.acquire(blocking=False))
+                thread_locked.set()
+            graceful_ending.set()
+
+        t = threading.Thread(target=thread)
+        t.daemon = True
+
+        with lock1:
+            t.start()
+            thread_locked.wait()
+            self.assertTrue(thread_locked.is_set())
+        t.join()
+        graceful_ending.wait()
+        self.assertTrue(graceful_ending.is_set())
+
+    def test_get_lock_twice_locked_twice(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        with lock1:
+            self.assertFalse(lock2.acquire(blocking=False))
+
+    def test_get_lock_context_fails(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        with mock.patch.object(lock2, 'acquire', return_value=False):
+            with lock1:
+                self.assertRaises(
+                    tooz.coordination.LockAcquireFailed,
+                    lock2.__enter__)
+
+    def test_get_lock_context_check_value(self):
+        name = self._get_random_uuid()
+        lock = self._coord.get_lock(name)
+        with lock as returned_lock:
+            self.assertEqual(lock, returned_lock)
+
+    def test_get_lock_locked_twice(self):
+        name = self._get_random_uuid()
+        lock = self._coord.get_lock(name)
+        with lock:
+            self.assertFalse(lock.acquire(blocking=False))
 
     def test_get_multiple_locks_with_same_coord(self):
         name = self._get_random_uuid()
         lock1 = self._coord.get_lock(name)
         lock2 = self._coord.get_lock(name)
-        self.assertEqual(True, lock1.acquire())
-        self.assertEqual(False, lock2.acquire(blocking=False))
-        self.assertEqual(False,
-                         self._coord.get_lock(name).acquire(blocking=False))
-        lock1.release()
+        self.assertTrue(lock1.acquire())
+        self.assertFalse(lock2.acquire(blocking=False))
+        self.assertFalse(self._coord.get_lock(name).acquire(blocking=False))
+        self.assertTrue(lock1.release())
 
-    def test_get_multiple_locks_with_same_coord_without_ref(self):
-        # NOTE(sileht): weird test case who want a lock that can't be
-        # released ? This tests is here to ensure that the
-        # acquired first lock in not vanished by the gc and get accidentally
-        # released.
-        # This test ensures that the consumer application will stuck when it
-        # looses the ref of a acquired lock instead of create a race.
-        # Also, by its nature this tests don't cleanup the created
-        # semaphore by the ipc:// driver, don't close opened files and
-        # sql connections and that the desired behavior.
+    def test_ensure_acquire_release_return(self):
         name = self._get_random_uuid()
-        self.assertEqual(True, self._coord.get_lock(name).acquire())
-        self.assertEqual(False,
-                         self._coord.get_lock(name).acquire(blocking=False))
+        lock1 = self._coord.get_lock(name)
+        self.assertTrue(lock1.acquire())
+        self.assertTrue(lock1.release())
+        self.assertFalse(lock1.release())
 
     def test_get_lock_multiple_coords(self):
         member_id2 = self._get_random_uuid()
@@ -610,13 +729,24 @@ class TestAPI(testscenarios.TestWithScenarios,
 
         lock_name = self._get_random_uuid()
         lock = self._coord.get_lock(lock_name)
-        self.assertEqual(True, lock.acquire())
+        self.assertTrue(lock.acquire())
 
         lock2 = client2.get_lock(lock_name)
-        self.assertEqual(False, lock2.acquire(blocking=False))
-        lock.release()
-        self.assertEqual(True, lock2.acquire(blocking=True))
-        lock2.release()
+        self.assertFalse(lock2.acquire(blocking=False))
+        self.assertTrue(lock.release())
+        self.assertTrue(lock2.acquire(blocking=True))
+        self.assertTrue(lock2.release())
+
+    def test_get_started_status(self):
+        self.assertTrue(self._coord.is_started)
+        self._coord.stop()
+        self.assertFalse(self._coord.is_started)
+        self._coord.start()
+
+    def do_test_name_property(self):
+        name = self._get_random_uuid()
+        lock = self._coord.get_lock(name)
+        self.assertEqual(name, lock.name)
 
     @staticmethod
     def _get_random_uuid():

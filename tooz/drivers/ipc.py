@@ -122,7 +122,14 @@ class IPCLock(locking.Lock):
 
 
 class IPCDriver(coordination.CoordinationDriver):
-    """A IPC based driver."""
+    """A `IPC`_ based driver.
+
+    This driver uses `IPC`_ concepts to provide the coordination driver
+    semantics and required API(s). It **is** missing some functionality but
+    in the future these not implemented API(s) will be filled in.
+
+    .. _IPC: http://en.wikipedia.org/wiki/Inter-process_communication
+    """
 
     _SEGMENT_SIZE = 1024
     _GROUP_LIST_KEY = "GROUP_LIST"
@@ -132,6 +139,7 @@ class IPCDriver(coordination.CoordinationDriver):
     def __init__(self, member_id, parsed_url, options):
         """Initialize the IPC driver."""
         super(IPCDriver, self).__init__()
+        self._executor = utils.ProxyExecutor.build("IPC", options)
 
     def _start(self):
         self._group_list = sysv_ipc.SharedMemory(
@@ -139,10 +147,10 @@ class IPCDriver(coordination.CoordinationDriver):
             sysv_ipc.IPC_CREAT,
             size=self._SEGMENT_SIZE)
         self._lock = self.get_lock(self._INTERNAL_LOCK_NAME)
-        self._executor = futures.ThreadPoolExecutor(max_workers=1)
+        self._executor.start()
 
     def _stop(self):
-        self._executor.shutdown(wait=True)
+        self._executor.stop()
         try:
             self._group_list.detach()
             self._group_list.remove()
@@ -232,7 +240,9 @@ class IPCFutureResult(coordination.CoordAsyncResult):
         try:
             return self._fut.result(timeout=timeout)
         except futures.TimeoutError as e:
-            raise coordination.OperationTimedOut(utils.exception_message(e))
+            coordination.raise_with_cause(coordination.OperationTimedOut,
+                                          utils.exception_message(e),
+                                          cause=e)
 
     def done(self):
         return self._fut.done()
