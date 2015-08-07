@@ -31,7 +31,7 @@ wait_for_line () {
 wait_for_mysql_ping () {
 	echo -n pinging mysqld.
 	attempts=0
-	while ! /usr/bin/mysqladmin --socket=${MYSQL_DATA}/mysql.sock ping ; do
+	while ! /usr/bin/mysqladmin --socket=${MYSQL_DATA}/mysql.socket ping ; do
 		sleep 3
 		attempts=$((attempts+1))
 		if [ ${attempts} -gt 3 ] ; then
@@ -43,6 +43,8 @@ wait_for_mysql_ping () {
 
 trap "clean_exit" EXIT
 
+PGSQL_DATA=`mktemp -d /tmp/tooz-pgsql-XXXXX`
+PGSQL_PORT=9825
 PGSQL_PATH=`pg_config --bindir`
 
 # Start MySQL process for tests
@@ -57,8 +59,6 @@ export TOOZ_TEST_MYSQL_URL="mysql://root@localhost/test?unix_socket=${MYSQL_DATA
 
 
 # Start PostgreSQL process for tests
-PGSQL_DATA=`mktemp -d /tmp/tooz-pgsql-XXXXX`
-PGSQL_PORT=9825
 ${PGSQL_PATH}/initdb ${PGSQL_DATA}
 ${PGSQL_PATH}/pg_ctl -w -D ${PGSQL_DATA} -o "-k ${PGSQL_DATA} -p ${PGSQL_PORT}" start
 # Wait for PostgreSQL to start listening to connections
