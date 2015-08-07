@@ -41,6 +41,15 @@ wait_for_mysql_ping () {
 	done
 }
 
+get_random_port () {
+	PORT=13306
+	while netstat -atwn | grep "^.*:${PORT}.*:\*\s*LISTEN\s*$"
+	do
+		PORT=$(( ${PORT} + 1 ))
+	done
+}
+
+
 trap "clean_exit" EXIT
 
 PGSQL_DATA=`mktemp -d /tmp/tooz-pgsql-XXXXX`
@@ -48,15 +57,16 @@ PGSQL_PORT=9825
 PGSQL_PATH=`pg_config --bindir`
 
 # Start MySQL process for tests
+get_random_port
+
 MYSQL_DATA=`mktemp -d /tmp/tooz-mysql-XXXXX`
 mkfifo ${MYSQL_DATA}/out
-/usr/sbin/mysqld --datadir=${MYSQL_DATA} --pid-file=${MYSQL_DATA}/mysql.pid --socket=${MYSQL_DATA}/mysql.socket --skip-networking --skip-grant-tables &
+/usr/sbin/mysqld --datadir=${MYSQL_DATA} --port=${PORT} --pid-file=${MYSQL_DATA}/mysql.pid --socket=${MYSQL_DATA}/mysql.socket --slow-query-log-file=${MYSQL_DATA}/mysql-slow.log --skip-grant-tables &
 # Wait for MySQL to start listening to connections
 wait_for_mysql_ping
 #wait_for_line "mysqld: ready for connections." ${MYSQL_DATA}/out
 mysql -S ${MYSQL_DATA}/mysql.socket -e 'CREATE DATABASE test;'
-export TOOZ_TEST_MYSQL_URL="mysql://root@localhost/test?unix_socket=${MYSQL_DATA}/mysql.socket"
-
+export TOOZ_TEST_MYSQL_URL="mysql://root@localhost:${PORT}/test"
 
 # Start PostgreSQL process for tests
 ${PGSQL_PATH}/initdb ${PGSQL_DATA}
