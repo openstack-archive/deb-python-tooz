@@ -2,6 +2,8 @@ python-tooz (1.21.0-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Fixed MySQLd runs in unit tests.
+  * Disabled Py3 tests as it fails in concurrent.futures.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 06 Aug 2015 07:56:31 +0000
 
