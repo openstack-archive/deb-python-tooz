@@ -30,8 +30,7 @@ wait_for_line () {
 
 trap "clean_exit" EXIT
 
-# On systems like Fedora here's where mysqld can be found
-export PATH=$PATH:/usr/libexec
+PGSQL_PATH=`pg_config --bindir`
 
 # Start MySQL process for tests
 MYSQL_DATA=`mktemp -d /tmp/tooz-mysql-XXXXX`
@@ -45,7 +44,6 @@ export TOOZ_TEST_MYSQL_URL="mysql://root@localhost/test?unix_socket=${MYSQL_DATA
 
 # Start PostgreSQL process for tests
 PGSQL_DATA=`mktemp -d /tmp/tooz-pgsql-XXXXX`
-PGSQL_PATH=`pg_config --bindir`
 PGSQL_PORT=9825
 ${PGSQL_PATH}/initdb ${PGSQL_DATA}
 ${PGSQL_PATH}/pg_ctl -w -D ${PGSQL_DATA} -o "-k ${PGSQL_DATA} -p ${PGSQL_PORT}" start
