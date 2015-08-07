@@ -28,6 +28,19 @@ wait_for_line () {
     cat "$2" >/dev/null &
 }
 
+wait_for_mysql_ping () {
+	echo -n pinging mysqld.
+	attempts=0
+	while ! /usr/bin/mysqladmin --socket=${MYSQL_DATA}/mysql.sock ping ; do
+		sleep 3
+		attempts=$((attempts+1))
+		if [ ${attempts} -gt 3 ] ; then
+			echo "skipping test, mysql server could not be contacted after 30 seconds"
+			exit 1
+		fi
+	done
+}
+
 trap "clean_exit" EXIT
 
 PGSQL_PATH=`pg_config --bindir`
@@ -35,9 +48,10 @@ PGSQL_PATH=`pg_config --bindir`
 # Start MySQL process for tests
 MYSQL_DATA=`mktemp -d /tmp/tooz-mysql-XXXXX`
 mkfifo ${MYSQL_DATA}/out
-mysqld --datadir=${MYSQL_DATA} --pid-file=${MYSQL_DATA}/mysql.pid --socket=${MYSQL_DATA}/mysql.socket --skip-networking --skip-grant-tables &> ${MYSQL_DATA}/out &
+/usr/sbin/mysqld --datadir=${MYSQL_DATA} --pid-file=${MYSQL_DATA}/mysql.pid --socket=${MYSQL_DATA}/mysql.socket --skip-networking --skip-grant-tables &
 # Wait for MySQL to start listening to connections
-wait_for_line "mysqld: ready for connections." ${MYSQL_DATA}/out
+wait_for_mysql_ping
+#wait_for_line "mysqld: ready for connections." ${MYSQL_DATA}/out
 mysql -S ${MYSQL_DATA}/mysql.socket -e 'CREATE DATABASE test;'
 export TOOZ_TEST_MYSQL_URL="mysql://root@localhost/test?unix_socket=${MYSQL_DATA}/mysql.socket"
 
