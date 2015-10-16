@@ -71,7 +71,7 @@ Build-Depends-Indep: memcached,
 Standards-Version: 3.9.6
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-tooz.git
 Vcs-Git: git://anonscm.debian.org/openstack/python-tooz.git
-Homepage: https://github.com/stackforge/tooz
+Homepage: https://github.com/openstack/tooz
 
 Package: python-tooz
 Architecture: all

@@ -1,6 +1,8 @@
 python-tooz (1.21.0-2) unstable; urgency=medium
 
   * Uploading to unstable.
+  * Fixed new upsteram VCS and watch file using github not PyPi.
+  * Using override_dh_auto_install not dh_install.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 16 Oct 2015 12:16:04 +0000
 
