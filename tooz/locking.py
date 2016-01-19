@@ -16,10 +16,21 @@
 import abc
 
 import six
-import threading
-import weakref
 
+import tooz
 from tooz import coordination
+
+
+class _LockProxy(object):
+    def __init__(self, lock, blocking=True):
+        self.lock = lock
+        self.blocking = blocking
+
+    def __enter__(self):
+        return self.lock.__enter__(self.blocking)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.lock.__exit__(exc_type, exc_val, exc_tb)
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -33,8 +44,11 @@ class Lock(object):
     def name(self):
         return self._name
 
-    def __enter__(self):
-        acquired = self.acquire()
+    def __call__(self, blocking=True):
+        return _LockProxy(self, blocking)
+
+    def __enter__(self, blocking=True):
+        acquired = self.acquire(blocking)
         if not acquired:
             msg = u'Acquiring lock %s failed' % self.name
             raise coordination.LockAcquireFailed(msg)
@@ -43,6 +57,15 @@ class Lock(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+    def is_still_owner(self):
+        """Checks if the lock is still owned by the acquiree.
+
+        :returns: returns true if still acquired (false if not) and
+                  false if the lock was never acquired in the first place
+                  or raises ``NotImplemented`` if not implemented.
+        """
+        raise tooz.NotImplemented
 
     @abc.abstractmethod
     def release(self):
@@ -68,57 +91,3 @@ class Lock(object):
         :rtype: bool
 
         """
-
-
-class SharedWeakLockHelper(Lock):
-    """Helper for lock that need to rely on a state in memory and
-    be the same object across each coordinator.get_lock(...)
-    """
-
-    LOCKS_LOCK = threading.Lock()
-    ACQUIRED_LOCKS = dict()
-    RELEASED_LOCKS = weakref.WeakValueDictionary()
-
-    def __init__(self, namespace, lockclass, name, *args, **kwargs):
-        super(SharedWeakLockHelper, self).__init__(name)
-        self._lock_key = "%s:%s" % (namespace, name)
-        self._newlock = lambda: lockclass(
-            self.name, *args, **kwargs)
-
-    @property
-    def lock(self):
-        """Access the underlying lock object.
-
-        For internal usage only.
-        """
-        with self.LOCKS_LOCK:
-            try:
-                l = self.ACQUIRED_LOCKS[self._lock_key]
-            except KeyError:
-                l = self.RELEASED_LOCKS.setdefault(
-                    self._lock_key, self._newlock())
-            return l
-
-    def acquire(self, blocking=True):
-        l = self.lock
-        if l.acquire(blocking):
-            with self.LOCKS_LOCK:
-                self.RELEASED_LOCKS.pop(self._lock_key, None)
-                self.ACQUIRED_LOCKS[self._lock_key] = l
-            return True
-        return False
-
-    def release(self):
-        with self.LOCKS_LOCK:
-            try:
-                l = self.ACQUIRED_LOCKS.pop(self._lock_key)
-            except KeyError:
-                return False
-            else:
-                if l.release():
-                    self.RELEASED_LOCKS[self._lock_key] = l
-                    return True
-                else:
-                    # Put it back...
-                    self.ACQUIRED_LOCKS[self._lock_key] = l
-                    return False

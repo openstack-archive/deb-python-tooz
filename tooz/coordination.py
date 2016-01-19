@@ -64,6 +64,14 @@ class LeaderElected(Event):
 @six.add_metaclass(abc.ABCMeta)
 class CoordinationDriver(object):
 
+    requires_beating = False
+    """
+    Usage requirement that if true requires that the :py:meth:`~.heartbeat`
+    be called periodically (at a given rate) to avoid locks, sessions and
+    other from being automatically closed/discarded by the coordinators
+    backing store.
+    """
+
     def __init__(self):
         self._started = False
         self._hooks_join_group = collections.defaultdict(Hooks)
@@ -78,7 +86,16 @@ class CoordinationDriver(object):
 
     @staticmethod
     def run_watchers(timeout=None):
-        """Run the watchers callback."""
+        """Run the watchers callback.
+
+        This may also activate :py:meth:`.run_elect_coordinator` (depending
+        on driver implementation).
+        """
+        raise tooz.NotImplemented
+
+    @staticmethod
+    def run_elect_coordinator():
+        """Try to leader elect this coordinator & activate hooks on success."""
         raise tooz.NotImplemented
 
     @abc.abstractmethod
@@ -279,6 +296,19 @@ class CoordinationDriver(object):
         :param member_id: the id of the member
         :type member_id: str
         :returns: capabilities of a member
+        :rtype: CoordAsyncResult
+        """
+        raise tooz.NotImplemented
+
+    @staticmethod
+    def get_member_info(group_id, member_id):
+        """Return the statistics and capabilities of a member asynchronously.
+
+        :param group_id: the id of the group of the member
+        :type group_id: str
+        :param member_id: the id of the member
+        :type member_id: str
+        :returns: capabilities and statistics of a member
         :rtype: CoordAsyncResult
         """
         raise tooz.NotImplemented

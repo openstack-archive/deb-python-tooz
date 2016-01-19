@@ -194,6 +194,16 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertRaises(tooz.coordination.MemberNotJoined,
                           leave_group.get)
 
+    def test_get_lock_twice_locked_one_released_two(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        self.assertTrue(lock1.acquire())
+        self.assertFalse(lock2.acquire(blocking=False))
+        self.assertFalse(lock2.release())
+        self.assertTrue(lock1.release())
+        self.assertFalse(lock2.release())
+
     def test_get_members(self):
         group_id_test2 = self._get_random_uuid()
         member_id_test2 = self._get_random_uuid()
@@ -226,6 +236,7 @@ class TestAPI(testscenarios.TestWithScenarios,
         capa = self._coord.get_member_capabilities(self.group_id,
                                                    self.member_id).get()
         self.assertEqual(capa, caps)
+        self.assertEqual(capa['type'], caps['type'])
 
     def test_get_member_capabilities_nonexistent_group(self):
         capa = self._coord.get_member_capabilities(self.group_id,
@@ -241,6 +252,44 @@ class TestAPI(testscenarios.TestWithScenarios,
                                                    self.member_id)
         self.assertRaises(tooz.coordination.MemberNotJoined,
                           capa.get)
+
+    def test_get_member_info(self):
+        self._coord.create_group(self.group_id).get()
+        self._coord.join_group(self.group_id, b"test_capabilities")
+
+        member_info = self._coord.get_member_info(self.group_id,
+                                                  self.member_id).get()
+        self.assertEqual(member_info['capabilities'], b"test_capabilities")
+
+    def test_get_member_info_complex(self):
+        self._coord.create_group(self.group_id).get()
+        caps = {
+            'type': 'warrior',
+            'abilities': ['fight', 'flight', 'double-hit-damage'],
+        }
+        member_info = {'capabilities': 'caps',
+                       'created_at': '0',
+                       'updated_at': '0'}
+        self._coord.join_group(self.group_id, caps)
+        member_info = self._coord.get_member_info(self.group_id,
+                                                  self.member_id).get()
+        self.assertEqual(member_info['capabilities'], caps)
+
+    def test_get_member_info_nonexistent_group(self):
+        member_info = self._coord.get_member_info(self.group_id,
+                                                  self.member_id)
+        # Drivers raise one of those depending on their capability
+        self.assertRaisesAny([tooz.coordination.MemberNotJoined,
+                              tooz.coordination.GroupNotCreated],
+                             member_info.get)
+
+    def test_get_member_info_nonjoined_member(self):
+        self._coord.create_group(self.group_id).get()
+        member_id = self._get_random_uuid()
+        member_info = self._coord.get_member_info(self.group_id,
+                                                  member_id)
+        self.assertRaises(tooz.coordination.MemberNotJoined,
+                          member_info.get)
 
     def test_update_capabilities(self):
         self._coord.create_group(self.group_id).get()
@@ -661,7 +710,10 @@ class TestAPI(testscenarios.TestWithScenarios,
 
         def thread():
             with lock2:
-                self.assertFalse(lock1.acquire(blocking=False))
+                try:
+                    self.assertFalse(lock1.acquire(blocking=False))
+                except tooz.NotImplemented:
+                    pass
                 thread_locked.set()
             graceful_ending.set()
 
@@ -698,6 +750,47 @@ class TestAPI(testscenarios.TestWithScenarios,
         lock = self._coord.get_lock(name)
         with lock as returned_lock:
             self.assertEqual(lock, returned_lock)
+
+    def test_lock_context_manager_acquire_no_argument(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        with lock1():
+            self.assertFalse(lock2.acquire(blocking=False))
+
+    def test_lock_context_manager_acquire_argument_return_value(self):
+        name = self._get_random_uuid()
+        blocking_value = 10.12
+        lock = self._coord.get_lock(name)
+        with lock(blocking_value) as returned_lock:
+            self.assertEqual(lock, returned_lock)
+
+    def test_lock_context_manager_acquire_argument_release_within(self):
+        name = self._get_random_uuid()
+        blocking_value = 10.12
+        lock = self._coord.get_lock(name)
+        with lock(blocking_value) as returned_lock:
+            self.assertTrue(returned_lock.release())
+
+    def test_lock_context_manager_acquire_argument(self):
+        name = self._get_random_uuid()
+        blocking_value = 10.12
+        lock = self._coord.get_lock(name)
+        with mock.patch.object(lock, 'acquire', wraps=True, autospec=True) as \
+                mock_acquire:
+            with lock(blocking_value):
+                mock_acquire.assert_called_once_with(blocking_value)
+
+    def test_lock_context_manager_acquire_argument_timeout(self):
+        name = self._get_random_uuid()
+        lock1 = self._coord.get_lock(name)
+        lock2 = self._coord.get_lock(name)
+        with lock1:
+            try:
+                with lock2(False):
+                    self.fail('Lock acquire should have failed')
+            except tooz.coordination.LockAcquireFailed:
+                pass
 
     def test_get_lock_locked_twice(self):
         name = self._get_random_uuid()

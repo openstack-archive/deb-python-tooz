@@ -93,8 +93,8 @@ class PostgresLock(locking.Lock):
 
     def __init__(self, name, parsed_url, options):
         super(PostgresLock, self).__init__(name)
-        self._conn = PostgresDriver.get_connection(parsed_url, options)
         self.acquired = False
+        self._conn = PostgresDriver.get_connection(parsed_url, options)
         h = hashlib.md5()
         h.update(name)
         if six.PY2:
@@ -130,8 +130,6 @@ class PostgresLock(locking.Lock):
                     else:
                         raise _retry.Retry
 
-        kwargs = _retry.RETRYING_KWARGS.copy()
-        kwargs['stop_max_delay'] = blocking
         return _lock()
 
     def release(self):

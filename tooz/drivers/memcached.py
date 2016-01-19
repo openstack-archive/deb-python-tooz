@@ -72,6 +72,16 @@ class MemcachedLock(locking.Lock):
         super(MemcachedLock, self).__init__(self._LOCK_PREFIX + name)
         self.coord = coord
         self.timeout = timeout
+        self.acquired = False
+
+    def is_still_owner(self):
+        if not self.acquired:
+            return False
+        else:
+            owner = self.get_owner()
+            if owner is None:
+                return False
+            return owner == self.coord._member_id
 
     def acquire(self, blocking=True):
 
@@ -89,25 +99,56 @@ class MemcachedLock(locking.Lock):
                 return False
             raise _retry.Retry
 
-        return _acquire()
+        self.acquired = gotten = _acquire()
+        return gotten
 
     @_translate_failures
     def release(self):
-        if self.coord.client.delete(self.name, noreply=False):
+        if not self.acquired:
+            return False
+        # NOTE(harlowja): this has the potential to delete others locks
+        # especially if this key expired before the delete/release call is
+        # triggered.
+        #
+        # For example:
+        #
+        # 1. App #1 with coordinator 'A' acquires lock "b"
+        # 2. App #1 heartbeats every 10 seconds, expiry for lock let's
+        #    say is 11 seconds.
+        # 3. App #2 with coordinator also named 'A' blocks trying to get
+        #    lock "b" (let's say it retries attempts every 0.5 seconds)
+        # 4. App #1 is running behind a little bit, tries to heartbeat but
+        #    key has expired (log message is written); at this point app #1
+        #    doesn't own the lock anymore but it doesn't know that.
+        # 5. App #2 now retries and adds the key, and now it believes it
+        #    has the lock.
+        # 6. App #1 (still believing it has the lock) calls release, and
+        #    deletes app #2 lock, app #2 now doesn't own the lock anymore
+        #    but it doesn't know that and now app #(X + 1) can get it.
+        # 7. App #2 calls release (repeat #6 as many times as desired)
+        #
+        # Sadly I don't think memcache has the primitives to actually make
+        # this work, redis does because it has lua which can check a session
+        # id and then do the delete and bail out if the session id is not
+        # as expected but memcache doesn't seem to have any equivalent
+        # capability.
+        if (self in self.coord._acquired_locks
+           and self.coord.client.delete(self.name, noreply=False)):
             self.coord._acquired_locks.remove(self)
             return True
-        else:
-            return False
+        return False
 
     @_translate_failures
     def heartbeat(self):
         """Keep the lock alive."""
-        poked = self.coord.client.touch(self.name,
-                                        expire=self.timeout,
-                                        noreply=False)
-        if not poked:
-            LOG.warn("Unable to heartbeat by updating key '%s' with extended"
-                     " expiry of %s seconds", self.name, self.timeout)
+        if self.acquired:
+            poked = self.coord.client.touch(self.name,
+                                            expire=self.timeout,
+                                            noreply=False)
+            if not poked:
+                LOG.warn("Unable to heartbeat by updating key '%s' with"
+                         " extended expiry of %s seconds", self.name,
+                         self.timeout)
 
     @_translate_failures
     def get_owner(self):
@@ -122,6 +163,11 @@ class MemcachedDriver(coordination._RunWatchersMixin,
     semantics and required API(s). It **is** fully functional and implements
     all of the coordination driver API(s). It stores data into memcache
     using expiries and `msgpack`_ encoded values.
+
+    General recommendations/usage considerations:
+
+    - Memcache (without different backend technology) is a **cache** enough
+      said.
 
     .. _memcached: http://memcached.org/
     .. _msgpack: http://msgpack.org/
@@ -144,6 +190,9 @@ class MemcachedDriver(coordination._RunWatchersMixin,
 
     #: String used to keep a key/member alive (until it next expires).
     STILL_ALIVE = b"It's alive!"
+
+    #: This driver requires constant periodic (heart) beatings.
+    requires_beating = True
 
     def __init__(self, member_id, parsed_url, options):
         super(MemcachedDriver, self).__init__()
@@ -458,7 +507,7 @@ class MemcachedDriver(coordination._RunWatchersMixin,
                              self.leader_timeout)
 
     @_translate_failures
-    def _run_leadership(self):
+    def run_elect_coordinator(self):
         for group_id, hooks in six.iteritems(self._hooks_elected_leader):
             # Try to grab the lock, if that fails, that means someone has it
             # already.
@@ -471,7 +520,7 @@ class MemcachedDriver(coordination._RunWatchersMixin,
 
     def run_watchers(self, timeout=None):
         result = super(MemcachedDriver, self).run_watchers(timeout=timeout)
-        self._run_leadership()
+        self.run_elect_coordinator()
         return result
 
 

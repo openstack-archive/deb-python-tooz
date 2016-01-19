@@ -19,8 +19,12 @@ import copy
 
 from kazoo import client
 from kazoo import exceptions
+from kazoo.handlers import eventlet as eventlet_handler
+from kazoo.handlers import threading as threading_handler
 from kazoo.protocol import paths
+from oslo_utils import strutils
 import six
+from six.moves import filter as compat_filter
 
 from tooz import coordination
 from tooz import locking
@@ -31,14 +35,28 @@ class ZooKeeperLock(locking.Lock):
     def __init__(self, name, lock):
         super(ZooKeeperLock, self).__init__(name)
         self._lock = lock
+        self._client = lock.client
         self.acquired = False
 
+    def is_still_owner(self):
+        if not self.acquired:
+            return False
+        try:
+            data, _znode = self._client.get(
+                paths.join(self._lock.path, self._lock.node))
+            return data == self._lock.data
+        except (self._client.handler.timeout_exception,
+                exceptions.ConnectionLoss,
+                exceptions.ConnectionDropped,
+                exceptions.NoNodeError):
+            return False
+        except exceptions.KazooException as e:
+            coordination.raise_with_cause(coordination.ToozError,
+                                          "operation error: %s" % (e),
+                                          cause=e)
+
     def acquire(self, blocking=True):
-        if isinstance(blocking, bool):
-            timeout = None
-        else:
-            blocking = True
-            timeout = float(blocking)
+        blocking, timeout = utils.convert_blocking(blocking)
         self.acquired = self._lock.acquire(blocking=blocking,
                                            timeout=timeout)
         return self.acquired
@@ -63,7 +81,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
 
     def __init__(self, member_id, parsed_url, options):
         super(BaseZooKeeperDriver, self).__init__()
-        options = utils.collapse(options)
+        options = utils.collapse(options, exclude=['hosts'])
         self._options = options
         self._member_id = member_id
         self.timeout = int(options.get('timeout', '10'))
@@ -276,6 +294,39 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
                               timeout_exception=self._timeout_exception,
                               group_id=group_id, member_id=self._member_id)
 
+    @classmethod
+    def _get_member_info_handler(cls, async_result, timeout,
+                                 timeout_exception, group_id,
+                                 member_id):
+        try:
+            capabilities, znode_stats = async_result.get(block=True,
+                                                         timeout=timeout)
+        except timeout_exception as e:
+            coordination.raise_with_cause(coordination.OperationTimedOut,
+                                          utils.exception_message(e),
+                                          cause=e)
+        except exceptions.NoNodeError:
+            raise coordination.MemberNotJoined(group_id, member_id)
+        except exceptions.ZookeeperError as e:
+            coordination.raise_with_cause(coordination.ToozError,
+                                          utils.exception_message(e),
+                                          cause=e)
+        else:
+            member_info = {
+                'capabilities': cls._loads(capabilities),
+                'created_at': utils.millis_to_datetime(znode_stats.ctime),
+                'updated_at': utils.millis_to_datetime(znode_stats.mtime)
+            }
+            return member_info
+
+    def get_member_info(self, group_id, member_id):
+        member_path = self._path_member(group_id, member_id)
+        async_result = self._coord.get_async(member_path)
+        return ZooAsyncResult(async_result,
+                              self._get_member_info_handler,
+                              timeout_exception=self._timeout_exception,
+                              group_id=group_id, member_id=self._member_id)
+
     @staticmethod
     def _get_groups_handler(async_result, timeout, timeout_exception):
         try:
@@ -324,9 +375,36 @@ class KazooDriver(BaseZooKeeperDriver):
     driver API(s). It stores data into `zookeeper`_ using znodes
     and `msgpack`_ encoded values.
 
+    To configure the client to your liking a subset of the options defined at
+    http://kazoo.readthedocs.org/en/latest/api/client.html
+    will be extracted from the coordinator url (or any provided options),
+    so that a specific coordinator can be created that will work for you.
+
+    Currently the following options will be proxied to the contained client:
+
+    ================  ===============================  ====================
+    Name              Source                           Default
+    ================  ===============================  ====================
+    hosts             url netloc + 'hosts' option key  localhost:2181
+    timeout           'timeout' options key            10.0 (kazoo default)
+    connection_retry  'connection_retry' options key   None
+    command_retry     'command_retry' options key      None
+    randomize_hosts   'randomize_hosts' options key    True
+    ================  ===============================  ====================
+
     .. _kazoo: http://kazoo.readthedocs.org/
     .. _zookeeper: http://zookeeper.apache.org/
     .. _msgpack: http://msgpack.org/
+    """
+
+    HANDLERS = {
+        'eventlet': eventlet_handler.SequentialEventletHandler,
+        'threading': threading_handler.SequentialThreadingHandler,
+    }
+    """
+    Restricted immutable dict of handler 'kinds' -> handler classes that
+    this driver can accept via 'handler' option key (the expected value for
+    this option is one of the keys in this dictionary).
     """
 
     def __init__(self, member_id, parsed_url, options):
@@ -335,9 +413,33 @@ class KazooDriver(BaseZooKeeperDriver):
         self._member_id = member_id
         self._timeout_exception = self._coord.handler.timeout_exception
 
-    @classmethod
-    def _make_client(cls, parsed_url, options):
-        return client.KazooClient(hosts=parsed_url.netloc)
+    def _make_client(self, parsed_url, options):
+        # Creates a kazoo client,
+        # See: https://github.com/python-zk/kazoo/blob/2.2.1/kazoo/client.py
+        # for what options a client takes...
+        maybe_hosts = [parsed_url.netloc] + list(options.get('hosts', []))
+        hosts = list(compat_filter(None, maybe_hosts))
+        if not hosts:
+            hosts = ['localhost:2181']
+        randomize_hosts = options.get('randomize_hosts', True)
+        client_kwargs = {
+            'hosts': ",".join(hosts),
+            'timeout': float(options.get('timeout', self.timeout)),
+            'connection_retry': options.get('connection_retry'),
+            'command_retry': options.get('command_retry'),
+            'randomize_hosts': strutils.bool_from_string(randomize_hosts),
+        }
+        handler_kind = options.get('handler')
+        if handler_kind:
+            try:
+                handler_cls = self.HANDLERS[handler_kind]
+            except KeyError:
+                raise ValueError("Unknown handler '%s' requested"
+                                 " valid handlers are %s"
+                                 % (handler_kind,
+                                    sorted(self.HANDLERS.keys())))
+            client_kwargs['handler'] = handler_cls()
+        return client.KazooClient(**client_kwargs)
 
     def _watch_group(self, group_id):
         get_members_req = self.get_members(group_id)
@@ -454,17 +556,12 @@ class KazooDriver(BaseZooKeeperDriver):
         return ZooAsyncResult(None, lambda *args: leader)
 
     def get_lock(self, name):
-        return ZooKeeperLock(
-            name,
-            self._coord.Lock(
-                self.paths_join(b"/", self._namespace, b"locks", name),
-                self._member_id.decode('ascii')))
+        z_lock = self._coord.Lock(
+            self.paths_join(b"/", self._namespace, b"locks", name),
+            self._member_id.decode('ascii'))
+        return ZooKeeperLock(name, z_lock)
 
-    def run_watchers(self, timeout=None):
-        ret = []
-        while self._watchers:
-            cb = self._watchers.popleft()
-            ret.extend(cb())
+    def run_elect_coordinator(self):
         for group_id in six.iterkeys(self._hooks_elected_leader):
             leader_lock = self._get_group_leader_lock(group_id)
             if leader_lock.is_acquired:
@@ -476,7 +573,14 @@ class KazooDriver(BaseZooKeeperDriver):
                     coordination.LeaderElected(
                         group_id,
                         self._member_id))
-        return ret
+
+    def run_watchers(self, timeout=None):
+        results = []
+        while self._watchers:
+            cb = self._watchers.popleft()
+            results.extend(cb())
+        self.run_elect_coordinator()
+        return results
 
 
 class ZooAsyncResult(coordination.CoordAsyncResult):

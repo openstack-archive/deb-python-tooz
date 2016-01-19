@@ -23,7 +23,6 @@ import string
 
 from concurrent import futures
 from oslo_utils import strutils
-from oslo_utils import timeutils
 import redis
 from redis import exceptions
 from redis import lock as redis_locks
@@ -57,32 +56,34 @@ def _translate_failures():
 
 class RedisLock(locking.Lock):
     def __init__(self, coord, client, name, timeout):
-        self._name = "%s_%s_lock" % (coord.namespace, six.text_type(name))
-        self._lock = redis_locks.LuaLock(client, self._name,
+        name = "%s_%s_lock" % (coord.namespace, six.text_type(name))
+        super(RedisLock, self).__init__(name)
+        self._lock = redis_locks.LuaLock(client, name,
                                          timeout=timeout,
                                          thread_local=False)
         self._coord = coord
-        self._acquired = False
+        self._client = client
+        self.acquired = False
 
-    @property
-    def name(self):
-        return self._name
+    def is_still_owner(self):
+        with _translate_failures():
+            lock_tok = self._lock.local.token
+            if not lock_tok:
+                return False
+            owner_tok = self._client.get(self.name)
+            return owner_tok == lock_tok
 
     def acquire(self, blocking=True):
-        if blocking is True or blocking is False:
-            blocking_timeout = None
-        else:
-            blocking_timeout = float(blocking)
-            blocking = True
+        blocking, timeout = utils.convert_blocking(blocking)
         with _translate_failures():
-            self._acquired = self._lock.acquire(
-                blocking=blocking, blocking_timeout=blocking_timeout)
-            if self._acquired:
+            self.acquired = self._lock.acquire(
+                blocking=blocking, blocking_timeout=timeout)
+            if self.acquired:
                 self._coord._acquired_locks.add(self)
-            return self._acquired
+            return self.acquired
 
     def release(self):
-        if not self._acquired:
+        if not self.acquired:
             return False
         with _translate_failures():
             try:
@@ -90,11 +91,11 @@ class RedisLock(locking.Lock):
             except exceptions.LockError:
                 return False
             self._coord._acquired_locks.discard(self)
-            self._acquired = False
+            self.acquired = False
             return True
 
     def heartbeat(self):
-        if self._acquired:
+        if self.acquired:
             with _translate_failures():
                 self._lock.extend(self._lock.timeout)
 
@@ -145,6 +146,13 @@ class RedisDriver(coordination._RunWatchersMixin,
     be addressed in https://github.com/andymccurdy/redis-py/issues/566 when
     that gets worked on). See http://redis.io/topics/transactions for more
     information on this topic.
+
+    General recommendations/usage considerations:
+
+    - When used for locks, run in AOF mode and think carefully about how
+      your redis deployment handles losing a server (the clustering support
+      is supposed to aid in losing servers, but it is also of unknown
+      reliablity and is relatively new, so use at your own risk).
 
     .. _redis: http://redis.io/
     .. _msgpack: http://msgpack.org/
@@ -289,6 +297,9 @@ return 1
 
     .. _Lua: http://www.lua.org
     """
+
+    #: This driver requires constant periodic (heart) beatings.
+    requires_beating = True
 
     def __init__(self, member_id, parsed_url, options):
         super(RedisDriver, self).__init__()
@@ -743,10 +754,8 @@ return 1
         name = self._encode_group_leader(group_id)
         return self.get_lock(name)
 
-    def _run_leadership(self, watch):
+    def run_elect_coordinator(self):
         for group_id, hooks in six.iteritems(self._hooks_elected_leader):
-            if watch.expired():
-                return
             leader_lock = self._get_leader_lock(group_id)
             if leader_lock.acquire(blocking=False):
                 # We got the lock
@@ -754,10 +763,8 @@ return 1
                                                      self._member_id))
 
     def run_watchers(self, timeout=None):
-        w = timeutils.StopWatch(duration=timeout)
-        w.start()
         result = super(RedisDriver, self).run_watchers(timeout=timeout)
-        self._run_leadership(w)
+        self.run_elect_coordinator()
         return result
 
 

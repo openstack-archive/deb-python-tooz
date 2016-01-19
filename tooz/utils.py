@@ -14,6 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
 import errno
 import os
 
@@ -103,6 +104,15 @@ def safe_abs_path(rooted_at, *pieces):
     return path
 
 
+def convert_blocking(blocking):
+    """Converts a multi-type blocking variable into its derivatives."""
+    timeout = None
+    if not isinstance(blocking, bool):
+        timeout = float(blocking)
+        blocking = True
+    return blocking, timeout
+
+
 def ensure_tree(path):
     """Create a directory (and any ancestor directories required).
 
@@ -175,3 +185,8 @@ def loads(blob, excp_cls=coordination.SerializationError):
     except (msgpack.UnpackException, ValueError) as e:
         coordination.raise_with_cause(excp_cls, exception_message(e),
                                       cause=e)
+
+
+def millis_to_datetime(milliseconds):
+    """Converts number of milliseconds (from epoch) into a datetime object."""
+    return datetime.datetime.fromtimestamp(float(milliseconds) / 1000)

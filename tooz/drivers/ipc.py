@@ -64,19 +64,15 @@ class IPCLock(locking.Lock):
         self._lock = None
 
     def acquire(self, blocking=True):
-        if (blocking is not True
-           and sysv_ipc.SEMAPHORE_TIMEOUT_SUPPORTED is False):
-            raise tooz.NotImplemented(
-                "This system does not support semaphore timeout")
-        # Convert blocking argument to a valid timeout value
-        if blocking is True:
-            timeout = None
-            start_time = None
-        elif blocking is False:
+        if (blocking is not True and
+                sysv_ipc.SEMAPHORE_TIMEOUT_SUPPORTED is False):
+            raise tooz.NotImplemented("This system does not support"
+                                      " semaphore timeouts")
+        blocking, timeout = utils.convert_blocking(blocking)
+        start_time = None
+        if not blocking:
             timeout = 0
-            start_time = None
-        else:
-            timeout = blocking
+        elif blocking and timeout is not None:
             start_time = time.time()
         while True:
             try:
@@ -127,6 +123,12 @@ class IPCDriver(coordination.CoordinationDriver):
     This driver uses `IPC`_ concepts to provide the coordination driver
     semantics and required API(s). It **is** missing some functionality but
     in the future these not implemented API(s) will be filled in.
+
+    General recommendations/usage considerations:
+
+    - It is **not** distributed (or recommended to be used in those
+      situations, so the developer using this should really take that into
+      account when applying this driver in there app).
 
     .. _IPC: http://en.wikipedia.org/wiki/Inter-process_communication
     """
