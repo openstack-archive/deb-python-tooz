@@ -1,3 +1,9 @@
+python-tooz (1.29.0-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 19 Jan 2016 02:10:55 +0000
+
 python-tooz (1.21.0-2) unstable; urgency=medium
 
   * Uploading to unstable.
