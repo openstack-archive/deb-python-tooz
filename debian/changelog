@@ -1,3 +1,9 @@
+python-tooz (1.29.0-2) UNRELEASED; urgency=medium
+
+  * d/rules: Enable py3 tests.
+
+ -- Corey Bryant <corey.bryant@canonical.com>  Wed, 20 Jan 2016 15:55:34 -0500
+
 python-tooz (1.29.0-1) experimental; urgency=medium
 
   * New upstream release.
