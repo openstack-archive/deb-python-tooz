@@ -1,6 +1,10 @@
 python-tooz (1.29.0-2) UNRELEASED; urgency=medium
 
+  [ Corey Bryant ]
   * d/rules: Enable py3 tests.
+
+  [ Ondřej Nový ]
+  * Fixed VCS URLs (https).
 
  -- Corey Bryant <corey.bryant@canonical.com>  Wed, 20 Jan 2016 15:55:34 -0500
 
