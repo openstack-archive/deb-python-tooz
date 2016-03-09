@@ -22,6 +22,7 @@ import logging
 import string
 
 from concurrent import futures
+from oslo_utils import encodeutils
 from oslo_utils import strutils
 import redis
 from redis import exceptions
@@ -46,11 +47,11 @@ def _translate_failures():
         yield
     except (exceptions.ConnectionError, exceptions.TimeoutError) as e:
         coordination.raise_with_cause(coordination.ToozConnectionError,
-                                      utils.exception_message(e),
+                                      encodeutils.exception_to_unicode(e),
                                       cause=e)
     except exceptions.RedisError as e:
         coordination.raise_with_cause(coordination.ToozError,
-                                      utils.exception_message(e),
+                                      encodeutils.exception_to_unicode(e),
                                       cause=e)
 
 
@@ -63,7 +64,6 @@ class RedisLock(locking.Lock):
                                          thread_local=False)
         self._coord = coord
         self._client = client
-        self.acquired = False
 
     def is_still_owner(self):
         with _translate_failures():
@@ -73,14 +73,18 @@ class RedisLock(locking.Lock):
             owner_tok = self._client.get(self.name)
             return owner_tok == lock_tok
 
+    def break_(self):
+        with _translate_failures():
+            return bool(self._client.delete(self.name))
+
     def acquire(self, blocking=True):
         blocking, timeout = utils.convert_blocking(blocking)
         with _translate_failures():
-            self.acquired = self._lock.acquire(
+            acquired = self._lock.acquire(
                 blocking=blocking, blocking_timeout=timeout)
-            if self.acquired:
+            if acquired:
                 self._coord._acquired_locks.add(self)
-            return self.acquired
+            return acquired
 
     def release(self):
         if not self.acquired:
@@ -91,13 +95,16 @@ class RedisLock(locking.Lock):
             except exceptions.LockError:
                 return False
             self._coord._acquired_locks.discard(self)
-            self.acquired = False
             return True
 
     def heartbeat(self):
         if self.acquired:
             with _translate_failures():
                 self._lock.extend(self._lock.timeout)
+
+    @property
+    def acquired(self):
+        return self in self._coord._acquired_locks
 
 
 class RedisDriver(coordination._RunWatchersMixin,
@@ -158,6 +165,17 @@ class RedisDriver(coordination._RunWatchersMixin,
     .. _msgpack: http://msgpack.org/
     .. _sentinel: http://redis.io/topics/sentinel
     .. _AOF: http://redis.io/topics/persistence
+    """
+
+    CHARACTERISTICS = (
+        coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,
+        coordination.Characteristics.CAUSAL,
+    )
+    """
+    Tuple of :py:class:`~tooz.coordination.Characteristics` introspectable
+    enum member(s) that can be used to interogate how this driver works.
     """
 
     MIN_VERSION = version.LooseVersion("2.6.0")
@@ -229,9 +247,9 @@ class RedisDriver(coordination._RunWatchersMixin,
 
     #: Client arguments that are expected to be int convertible.
     CLIENT_INT_ARGS = frozenset([
-         'db',
-         'socket_keepalive',
-         'socket_timeout',
+        'db',
+        'socket_keepalive',
+        'socket_timeout',
     ])
 
     #: Default socket timeout to use when none is provided.
@@ -298,9 +316,6 @@ return 1
     .. _Lua: http://www.lua.org
     """
 
-    #: This driver requires constant periodic (heart) beatings.
-    requires_beating = True
-
     def __init__(self, member_id, parsed_url, options):
         super(RedisDriver, self).__init__()
         options = utils.collapse(options, exclude=self.CLIENT_LIST_ARGS)
@@ -314,12 +329,12 @@ return 1
         lock_timeout = options.get('lock_timeout', self.timeout)
         self.lock_timeout = int(lock_timeout)
         namespace = options.get('namespace', self.DEFAULT_NAMESPACE)
-        self._namespace = self._to_binary(namespace)
+        self._namespace = utils.to_binary(namespace, encoding=self._encoding)
         self._group_prefix = self._namespace + b"_group"
         self._beat_prefix = self._namespace + b"_beats"
         self._groups = self._namespace + b"_groups"
         self._client = None
-        self._member_id = self._to_binary(member_id)
+        self._member_id = utils.to_binary(member_id, encoding=self._encoding)
         self._acquired_locks = set()
         self._joined_groups = set()
         self._executor = utils.ProxyExecutor.build("Redis", options)
@@ -336,7 +351,7 @@ return 1
             raise TypeError("Version check expects a string/version type")
         try:
             redis_version = version.LooseVersion(
-                    self._server_info['redis_version'])
+                self._server_info['redis_version'])
         except KeyError:
             return (not_existent, None)
         else:
@@ -344,11 +359,6 @@ return 1
                 return (False, redis_version)
             else:
                 return (True, redis_version)
-
-    def _to_binary(self, text):
-        if not isinstance(text, six.binary_type):
-            text = text.encode(self._encoding)
-        return text
 
     @property
     def namespace(self):
@@ -420,7 +430,7 @@ return 1
                                              self.timeout)
         except exceptions.RedisError as e:
             coordination.raise_with_cause(coordination.ToozConnectionError,
-                                          utils.exception_message(e),
+                                          encodeutils.exception_to_unicode(e),
                                           cause=e)
         else:
             # Ensure that the server is alive and not dead, this does not
@@ -461,30 +471,30 @@ return 1
             self._started = True
 
     def _encode_beat_id(self, member_id):
-        return self.NAMESPACE_SEP.join([self._beat_prefix,
-                                        self._to_binary(member_id)])
+        member_id = utils.to_binary(member_id, encoding=self._encoding)
+        return self.NAMESPACE_SEP.join([self._beat_prefix, member_id])
 
     def _encode_member_id(self, member_id):
-        member_id = self._to_binary(member_id)
+        member_id = utils.to_binary(member_id, encoding=self._encoding)
         if member_id == self.GROUP_EXISTS:
             raise ValueError("Not allowed to use private keys as a member id")
         return member_id
 
     def _decode_member_id(self, member_id):
-        return self._to_binary(member_id)
+        return utils.to_binary(member_id, encoding=self._encoding)
 
     def _encode_group_leader(self, group_id):
-        group_id = self._to_binary(group_id)
+        group_id = utils.to_binary(group_id, encoding=self._encoding)
         return b"leader_of_" + group_id
 
     def _encode_group_id(self, group_id, apply_namespace=True):
-        group_id = self._to_binary(group_id)
+        group_id = utils.to_binary(group_id, encoding=self._encoding)
         if not apply_namespace:
             return group_id
         return self.NAMESPACE_SEP.join([self._group_prefix, group_id])
 
     def _decode_group_id(self, group_id):
-        return self._to_binary(group_id)
+        return utils.to_binary(group_id, encoding=self._encoding)
 
     def heartbeat(self):
         with _translate_failures():
@@ -784,7 +794,7 @@ class RedisFutureResult(coordination.CoordAsyncResult):
                 return self._fut.result(timeout=timeout)
         except futures.TimeoutError as e:
             coordination.raise_with_cause(coordination.OperationTimedOut,
-                                          utils.exception_message(e),
+                                          encodeutils.exception_to_unicode(e),
                                           cause=e)
 
     def done(self):

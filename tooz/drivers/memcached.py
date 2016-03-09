@@ -20,6 +20,7 @@ import logging
 import socket
 
 from concurrent import futures
+from oslo_utils import encodeutils
 from pymemcache import client as pymemcache_client
 import six
 
@@ -44,14 +45,14 @@ def _translate_failures(func):
             return func(*args, **kwargs)
         except pymemcache_client.MemcacheUnexpectedCloseError as e:
             coordination.raise_with_cause(coordination.ToozConnectionError,
-                                          utils.exception_message(e),
+                                          encodeutils.exception_to_unicode(e),
                                           cause=e)
         except (socket.timeout, socket.error,
                 socket.gaierror, socket.herror) as e:
             # TODO(harlowja): get upstream pymemcache to produce a better
             # exception for these, using socket (vs. a memcache specific
             # error) seems sorta not right and/or the best approach...
-            msg = utils.exception_message(e)
+            msg = encodeutils.exception_to_unicode(e)
             if e.errno is not None:
                 msg += " (with errno %s [%s])" % (errno.errorcode[e.errno],
                                                   e.errno)
@@ -59,7 +60,7 @@ def _translate_failures(func):
                                           msg, cause=e)
         except pymemcache_client.MemcacheError as e:
             coordination.raise_with_cause(coordination.ToozError,
-                                          utils.exception_message(e),
+                                          encodeutils.exception_to_unicode(e),
                                           cause=e)
 
     return wrapper
@@ -72,7 +73,6 @@ class MemcachedLock(locking.Lock):
         super(MemcachedLock, self).__init__(self._LOCK_PREFIX + name)
         self.coord = coord
         self.timeout = timeout
-        self.acquired = False
 
     def is_still_owner(self):
         if not self.acquired:
@@ -99,8 +99,11 @@ class MemcachedLock(locking.Lock):
                 return False
             raise _retry.Retry
 
-        self.acquired = gotten = _acquire()
-        return gotten
+        return _acquire()
+
+    @_translate_failures
+    def break_(self):
+        return bool(self.coord.client.delete(self.name, noreply=False))
 
     @_translate_failures
     def release(self):
@@ -132,11 +135,19 @@ class MemcachedLock(locking.Lock):
         # id and then do the delete and bail out if the session id is not
         # as expected but memcache doesn't seem to have any equivalent
         # capability.
-        if (self in self.coord._acquired_locks
-           and self.coord.client.delete(self.name, noreply=False)):
-            self.coord._acquired_locks.remove(self)
-            return True
-        return False
+        if self not in self.coord._acquired_locks:
+            return False
+        # Do a ghetto test to see what the value is... (see above note),
+        # and how this really can't be done safely with memcache due to
+        # it being done in the client side (non-atomic).
+        value = self.coord.client.get(self.name)
+        if value != self.coord._member_id:
+            return False
+        else:
+            was_deleted = self.coord.client.delete(self.name, noreply=False)
+            if was_deleted:
+                self.coord._acquired_locks.remove(self)
+            return was_deleted
 
     @_translate_failures
     def heartbeat(self):
@@ -153,6 +164,10 @@ class MemcachedLock(locking.Lock):
     @_translate_failures
     def get_owner(self):
         return self.coord.client.get(self.name)
+
+    @property
+    def acquired(self):
+        return self in self.coord._acquired_locks
 
 
 class MemcachedDriver(coordination._RunWatchersMixin,
@@ -173,6 +188,17 @@ class MemcachedDriver(coordination._RunWatchersMixin,
     .. _msgpack: http://msgpack.org/
     """
 
+    CHARACTERISTICS = (
+        coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,
+        coordination.Characteristics.CAUSAL,
+    )
+    """
+    Tuple of :py:class:`~tooz.coordination.Characteristics` introspectable
+    enum member(s) that can be used to interogate how this driver works.
+    """
+
     #: Key prefix attached to groups (used in name-spacing keys)
     GROUP_PREFIX = b'_TOOZ_GROUP_'
 
@@ -190,9 +216,6 @@ class MemcachedDriver(coordination._RunWatchersMixin,
 
     #: String used to keep a key/member alive (until it next expires).
     STILL_ALIVE = b"It's alive!"
-
-    #: This driver requires constant periodic (heart) beatings.
-    requires_beating = True
 
     def __init__(self, member_id, parsed_url, options):
         super(MemcachedDriver, self).__init__()
@@ -401,8 +424,8 @@ class MemcachedDriver(coordination._RunWatchersMixin,
         actual_group_members = {}
         for m, v in six.iteritems(group_members):
             # Never kick self from the group, we know we're alive
-            if (m == self._member_id
-               or self.client.get(self._encode_member_id(m))):
+            if (m == self._member_id or
+               self.client.get(self._encode_member_id(m))):
                 actual_group_members[m] = v
         if group_members != actual_group_members:
             # There are some dead members, update the group
@@ -533,9 +556,10 @@ class MemcachedFutureResult(coordination.CoordAsyncResult):
         try:
             return self._fut.result(timeout=timeout)
         except futures.TimeoutError as e:
-            coordination.raise_with_cause(coordination.OperationTimedOut,
-                                          utils.exception_message(e),
-                                          cause=e)
+            coordination.raise_with_cause(
+                coordination.OperationTimedOut,
+                encodeutils.exception_to_unicode(e),
+                cause=e)
 
     def done(self):
         return self._fut.done()

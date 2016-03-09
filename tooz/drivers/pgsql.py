@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import logging
 
+from oslo_utils import encodeutils
 import psycopg2
 import six
 
@@ -55,7 +56,8 @@ _DIAGNOSTICS_ATTRS = tuple([
 
 def _format_exception(e):
     lines = [
-        "%s: %s" % (type(e).__name__, utils.exception_message(e).strip()),
+        "%s: %s" % (type(e).__name__,
+                    encodeutils.exception_to_unicode(e).strip()),
     ]
     if hasattr(e, 'pgcode') and e.pgcode is not None:
         lines.append("Error code: %s" % e.pgcode)
@@ -158,6 +160,16 @@ class PostgresDriver(coordination.CoordinationDriver):
     .. _PostgreSQL: http://www.postgresql.org/
     """
 
+    CHARACTERISTICS = (
+        coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
+        coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,
+    )
+    """
+    Tuple of :py:class:`~tooz.coordination.Characteristics` introspectable
+    enum member(s) that can be used to interogate how this driver works.
+    """
+
     def __init__(self, member_id, parsed_url, options):
         """Initialize the PostgreSQL driver."""
         super(PostgresDriver, self).__init__()
@@ -200,9 +212,9 @@ class PostgresDriver(coordination.CoordinationDriver):
 
     @staticmethod
     def get_connection(parsed_url, options):
-        host = options.get("host")
-        port = parsed_url.port or options.get("port")
-        dbname = parsed_url.path[1:] or options.get("dbname")
+        host = options.get("host") or parsed_url.hostname
+        port = options.get("port") or parsed_url.port
+        dbname = options.get("dbname") or parsed_url.path[1:]
         username = parsed_url.username
         password = parsed_url.password
 

@@ -14,8 +14,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import base64
 import datetime
 import errno
+import operator
 import os
 
 import futurist
@@ -25,6 +27,30 @@ from oslo_utils import encodeutils
 import six
 
 from tooz import coordination
+
+
+class Base64LockEncoder(object):
+    def __init__(self, keyspace_url, prefix=''):
+        self.keyspace_url = keyspace_url
+        if prefix:
+            self.keyspace_url += prefix
+
+    def check_and_encode(self, name):
+        if not isinstance(name, (six.text_type, six.binary_type)):
+            raise TypeError("Provided lock name is expected to be a string"
+                            " or binary type and not %s" % type(name))
+        try:
+            return self.encode(name)
+        except (UnicodeDecodeError, UnicodeEncodeError) as e:
+            raise ValueError("Invalid lock name due to encoding/decoding "
+                             " issue: %s"
+                             % encodeutils.exception_to_unicode(e))
+
+    def encode(self, name):
+        if isinstance(name, six.text_type):
+            name = name.encode("ascii")
+        enc_name = base64.urlsafe_b64encode(name)
+        return self.keyspace_url + "/" + enc_name.decode("ascii")
 
 
 class ProxyExecutor(object):
@@ -128,7 +154,7 @@ def ensure_tree(path):
         return True
 
 
-def collapse(config, exclude=None, item_selector=None):
+def collapse(config, exclude=None, item_selector=operator.itemgetter(-1)):
     """Collapses config with keys and **list/tuple** values.
 
     NOTE(harlowja): The last item/index from the list/tuple value is selected
@@ -142,8 +168,6 @@ def collapse(config, exclude=None, item_selector=None):
         return {}
     if exclude is None:
         exclude = set()
-    if item_selector is None:
-        item_selector = lambda items: items[-1]
     collapsed = {}
     for (k, v) in six.iteritems(config):
         if isinstance(v, (tuple, list)):
@@ -155,11 +179,6 @@ def collapse(config, exclude=None, item_selector=None):
         else:
             collapsed[k] = v
     return collapsed
-
-
-# TODO(harlowja): get rid of this...
-#: Return the string (unicode) representation of an exception.
-exception_message = encodeutils.exception_to_unicode
 
 
 def to_binary(text, encoding='ascii'):
@@ -174,7 +193,8 @@ def dumps(data, excp_cls=coordination.SerializationError):
     try:
         return msgpackutils.dumps(data)
     except (msgpack.PackException, ValueError) as e:
-        coordination.raise_with_cause(excp_cls, exception_message(e),
+        coordination.raise_with_cause(excp_cls,
+                                      encodeutils.exception_to_unicode(e),
                                       cause=e)
 
 
@@ -183,7 +203,8 @@ def loads(blob, excp_cls=coordination.SerializationError):
     try:
         return msgpackutils.loads(blob)
     except (msgpack.UnpackException, ValueError) as e:
-        coordination.raise_with_cause(excp_cls, exception_message(e),
+        coordination.raise_with_cause(excp_cls,
+                                      encodeutils.exception_to_unicode(e),
                                       cause=e)
 
 

@@ -60,6 +60,8 @@ class TestAPI(testscenarios.TestWithScenarios,
                    'bad_url': 'mysql://localhost:1'}),
         ('zookeeper', {'url': os.getenv("TOOZ_TEST_ZOOKEEPER_URL"),
                        'bad_url': 'zookeeper://localhost:1'}),
+        ('etcd', {'url': os.getenv("TOOZ_TEST_ETCD_URL"),
+                  'bad_url': 'etcd://localhost:1'})
     ]
 
     def assertRaisesAny(self, exc_classes, callable_obj, *args, **kwargs):
@@ -102,6 +104,27 @@ class TestAPI(testscenarios.TestWithScenarios,
         self._coord.create_group(self.group_id).get()
         all_group_ids = self._coord.get_groups().get()
         self.assertTrue(self.group_id in all_group_ids)
+
+    def test_get_lock_release_broken(self):
+        name = self._get_random_uuid()
+        memberid2 = self._get_random_uuid()
+        coord2 = tooz.coordination.get_coordinator(self.url,
+                                                   memberid2)
+        coord2.start()
+        lock1 = self._coord.get_lock(name)
+        lock2 = coord2.get_lock(name)
+        self.assertTrue(lock1.acquire(blocking=False))
+        self.assertFalse(lock2.acquire(blocking=False))
+        self.assertTrue(lock2.break_())
+        self.assertTrue(lock2.acquire(blocking=False))
+        self.assertFalse(lock1.release())
+        # Assert lock is not accidentally broken now
+        memberid3 = self._get_random_uuid()
+        coord3 = tooz.coordination.get_coordinator(self.url,
+                                                   memberid3)
+        coord3.start()
+        lock3 = coord3.get_lock(name)
+        self.assertFalse(lock3.acquire(blocking=False))
 
     def test_create_group_already_exist(self):
         self._coord.create_group(self.group_id).get()
@@ -648,6 +671,24 @@ class TestAPI(testscenarios.TestWithScenarios,
         self._coord.unwatch_elected_as_leader(self.group_id, self._set_event)
         self.assertEqual(0, len(self._coord._hooks_elected_leader))
 
+    def test_unwatch_elected_as_leader_callback_not_found(self):
+        self._coord.create_group(self.group_id).get()
+        self.assertRaises(tooz.coordination.WatchCallbackNotFound,
+                          self._coord.unwatch_elected_as_leader,
+                          self.group_id, lambda x: None)
+
+    def test_unwatch_join_group_callback_not_found(self):
+        self._coord.create_group(self.group_id).get()
+        self.assertRaises(tooz.coordination.WatchCallbackNotFound,
+                          self._coord.unwatch_join_group,
+                          self.group_id, lambda x: None)
+
+    def test_unwatch_leave_group_callback_not_found(self):
+        self._coord.create_group(self.group_id).get()
+        self.assertRaises(tooz.coordination.WatchCallbackNotFound,
+                          self._coord.unwatch_leave_group,
+                          self.group_id, lambda x: None)
+
     def test_get_lock(self):
         lock = self._coord.get_lock(self._get_random_uuid())
         self.assertTrue(lock.acquire())
@@ -844,6 +885,13 @@ class TestAPI(testscenarios.TestWithScenarios,
     @staticmethod
     def _get_random_uuid():
         return str(uuid.uuid4()).encode('ascii')
+
+    def test_acquire_twice_no_deadlock_releasing(self):
+        name = self._get_random_uuid()
+        lock = self._coord.get_lock(name)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.assertFalse(lock.acquire(blocking=False))
+        self.assertTrue(lock.release())
 
 
 class TestHook(testcase.TestCase):
