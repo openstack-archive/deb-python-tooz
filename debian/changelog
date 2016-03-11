@@ -8,7 +8,9 @@ python-tooz (1.34.0-1) experimental; urgency=medium
 
   [ Thomas Goirand ]
   * New upstream release.
-  * Fixed (build-)depends for this rleease.
+  * Fixed (build-)depends for this release.
+  * Cleans /tmp/groups before running unit tests, which was the reason so that
+    Py3 tests were failing.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 09 Mar 2016 16:46:24 +0100
 
