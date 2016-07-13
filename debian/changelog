@@ -7,6 +7,7 @@ python-tooz (1.40.0-1) experimental; urgency=medium
   [ Thomas Goirand ]
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Using pkgos-dh_auto_{test,install} from openstack-pkg-tools >= 52~.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 13 Jul 2016 13:01:52 +0200
 
