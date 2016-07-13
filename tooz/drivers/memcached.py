@@ -157,9 +157,9 @@ class MemcachedLock(locking.Lock):
                                             expire=self.timeout,
                                             noreply=False)
             if not poked:
-                LOG.warn("Unable to heartbeat by updating key '%s' with"
-                         " extended expiry of %s seconds", self.name,
-                         self.timeout)
+                LOG.warning("Unable to heartbeat by updating key '%s' with "
+                            "extended expiry of %s seconds", self.name,
+                            self.timeout)
 
     @_translate_failures
     def get_owner(self):
@@ -486,6 +486,9 @@ class MemcachedDriver(coordination._RunWatchersMixin,
         # Reset the acquired locks
         for lock in self._acquired_locks:
             lock.heartbeat()
+        return min(self.membership_timeout,
+                   self.leader_timeout,
+                   self.lock_timeout)
 
     @_translate_failures
     def _init_watch_group(self, group_id):

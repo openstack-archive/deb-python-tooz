@@ -8,8 +8,14 @@ Interfaces
 .. autoclass:: tooz.coordination.CoordinationDriver
    :members:
 
+Consul
+~~~~~~
+
+.. autoclass:: tooz.drivers.consul.ConsulDriver
+   :members:
+
 Etcd
-~~~
+~~~~
 
 .. autoclass:: tooz.drivers.etcd.EtcdDriver
    :members:

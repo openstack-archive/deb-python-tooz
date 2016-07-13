@@ -22,7 +22,7 @@ import uuid
 from concurrent import futures
 import fixtures
 import mock
-import testscenarios
+from six.moves.urllib import parse
 from testtools import matchers
 from testtools import testcase
 
@@ -39,30 +39,9 @@ def try_to_lock_job(name, coord, url, member_id):
     return lock2.acquire(blocking=False)
 
 
-class TestAPI(testscenarios.TestWithScenarios,
-              tests.TestCaseSkipNotImplemented):
+class TestAPI(tests.TestCaseSkipNotImplemented):
 
-    scenarios = [
-        ('kazoo', {'url': os.getenv("TOOZ_TEST_ZOOKEEPER_URL"),
-                   'bad_url': 'kazoo://localhost:1'}),
-        ('zake', {'url': 'zake://?timeout=5'}),
-        ('memcached', {'url': os.getenv("TOOZ_TEST_MEMCACHED_URL"),
-                       'bad_url': 'memcached://localhost:1',
-                       'timeout_capable': True}),
-        ('ipc', {'url': 'ipc://'}),
-        ('file', {'url': 'file:///tmp'}),
-        ('redis', {'url': os.getenv("TOOZ_TEST_REDIS_URL"),
-                   'bad_url': 'redis://localhost:1',
-                   'timeout_capable': True}),
-        ('postgresql', {'url': os.getenv("TOOZ_TEST_PGSQL_URL"),
-                        'bad_url': 'postgresql://localhost:1'}),
-        ('mysql', {'url': os.getenv("TOOZ_TEST_MYSQL_URL"),
-                   'bad_url': 'mysql://localhost:1'}),
-        ('zookeeper', {'url': os.getenv("TOOZ_TEST_ZOOKEEPER_URL"),
-                       'bad_url': 'zookeeper://localhost:1'}),
-        ('etcd', {'url': os.getenv("TOOZ_TEST_ETCD_URL"),
-                  'bad_url': 'etcd://localhost:1'})
-    ]
+    url = os.getenv("TOOZ_TEST_URL")
 
     def assertRaisesAny(self, exc_classes, callable_obj, *args, **kwargs):
         checkers = [matchers.MatchesException(exc_class)
@@ -73,9 +52,9 @@ class TestAPI(testscenarios.TestWithScenarios,
 
     def setUp(self):
         super(TestAPI, self).setUp()
-        self.useFixture(fixtures.NestedTempfile())
         if self.url is None:
             self.skipTest("No URL set for this driver")
+        self.useFixture(fixtures.NestedTempfile())
         self.group_id = self._get_random_uuid()
         self.member_id = self._get_random_uuid()
         self._coord = tooz.coordination.get_coordinator(self.url,
@@ -86,11 +65,14 @@ class TestAPI(testscenarios.TestWithScenarios,
         self._coord.stop()
         super(TestAPI, self).tearDown()
 
-    def test_connection_error(self):
-        if not hasattr(self, "bad_url"):
-            raise testcase.TestSkipped("No bad URL provided")
-        coord = tooz.coordination.get_coordinator(self.bad_url,
-                                                  self.member_id)
+    def test_connection_error_bad_host(self):
+        if (tooz.coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS
+           not in self._coord.CHARACTERISTICS):
+            self.skipTest("This driver is not distributed across hosts")
+        scheme = parse.urlparse(self.url).scheme
+        coord = tooz.coordination.get_coordinator(
+            "%s://localhost:1/f00" % scheme,
+            self.member_id)
         self.assertRaises(tooz.coordination.ToozConnectionError,
                           coord.start)
 
@@ -138,7 +120,7 @@ class TestAPI(testscenarios.TestWithScenarios,
             self._coord.create_group(group_id).get()
         created_groups = self._coord.get_groups().get()
         for group_id in groups_ids:
-            self.assertTrue(group_id in created_groups)
+            self.assertIn(group_id, created_groups)
 
     def test_delete_group(self):
         self._coord.create_group(self.group_id).get()
@@ -337,7 +319,27 @@ class TestAPI(testscenarios.TestWithScenarios,
                              update_cap.get)
 
     def test_heartbeat(self):
+        if not self._coord.requires_beating:
+            raise testcase.TestSkipped("Test not applicable (heartbeating"
+                                       " not required)")
         self._coord.heartbeat()
+
+    def test_heartbeat_loop(self):
+        if not self._coord.requires_beating:
+            raise testcase.TestSkipped("Test not applicable (heartbeating"
+                                       " not required)")
+
+        heart = self._coord.heart
+        self.assertFalse(heart.is_alive())
+        heart.start()
+
+        # This will timeout if nothing ever is done...
+        try:
+            while not heart.beats:
+                time.sleep(1)
+        finally:
+            heart.stop()
+            heart.wait()
 
     def test_disconnect_leave_group(self):
         member_id_test2 = self._get_random_uuid()
@@ -356,11 +358,20 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertTrue(member_id_test2 not in members_ids)
 
     def test_timeout(self):
-        if not getattr(self, "timeout_capable", False):
-            self.skipTest("This test only works with timeout capable drivers")
+        if (tooz.coordination.Characteristics.NON_TIMEOUT_BASED
+           in self._coord.CHARACTERISTICS):
+            self.skipTest("This driver is not based on timeout")
+        self._coord.stop()
+        if "?" in self.url:
+            sep = "&"
+        else:
+            sep = "?"
+        url = self.url + sep + "timeout=5"
+        self._coord = tooz.coordination.get_coordinator(url, self.member_id)
+        self._coord.start()
+
         member_id_test2 = self._get_random_uuid()
-        client2 = tooz.coordination.get_coordinator(self.url,
-                                                    member_id_test2)
+        client2 = tooz.coordination.get_coordinator(url, member_id_test2)
         client2.start()
         self._coord.create_group(self.group_id).get()
         self._coord.join_group(self.group_id).get()
@@ -892,6 +903,18 @@ class TestAPI(testscenarios.TestWithScenarios,
         self.assertTrue(lock.acquire(blocking=False))
         self.assertFalse(lock.acquire(blocking=False))
         self.assertTrue(lock.release())
+
+
+class ZakeTestAPI(TestAPI):
+    url = "zake://"
+
+
+class IPCTestAPI(TestAPI):
+    url = "ipc://"
+
+
+class FileTestAPI(TestAPI):
+    url = "file:///tmp"
 
 
 class TestHook(testcase.TestCase):

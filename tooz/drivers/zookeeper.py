@@ -19,7 +19,10 @@ import copy
 
 from kazoo import client
 from kazoo import exceptions
-from kazoo.handlers import eventlet as eventlet_handler
+try:
+    from kazoo.handlers import eventlet as eventlet_handler
+except ImportError:
+    eventlet_handler = None
 from kazoo.handlers import threading as threading_handler
 from kazoo.protocol import paths
 from oslo_utils import encodeutils
@@ -232,6 +235,7 @@ class BaseZooKeeperDriver(coordination.CoordinationDriver):
             coordination.raise_with_cause(coordination.ToozError,
                                           encodeutils.exception_to_unicode(e),
                                           cause=e)
+        return self.timeout
 
     def leave_group(self, group_id):
         member_path = self._path_member(group_id, self._member_id)
@@ -424,9 +428,12 @@ class KazooDriver(BaseZooKeeperDriver):
     """
 
     HANDLERS = {
-        'eventlet': eventlet_handler.SequentialEventletHandler,
         'threading': threading_handler.SequentialThreadingHandler,
     }
+
+    if eventlet_handler:
+        HANDLERS['eventlet'] = eventlet_handler.SequentialEventletHandler
+
     """
     Restricted immutable dict of handler 'kinds' -> handler classes that
     this driver can accept via 'handler' option key (the expected value for
@@ -434,6 +441,7 @@ class KazooDriver(BaseZooKeeperDriver):
     """
 
     CHARACTERISTICS = (
+        coordination.Characteristics.NON_TIMEOUT_BASED,
         coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
         coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
         coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,

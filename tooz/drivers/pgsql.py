@@ -146,7 +146,7 @@ class PostgresLock(locking.Lock):
 
     def __del__(self):
         if self.acquired:
-            LOG.warn("unreleased lock %s garbage collected" % self.name)
+            LOG.warning("unreleased lock %s garbage collected", self.name)
 
 
 class PostgresDriver(coordination.CoordinationDriver):
@@ -161,6 +161,7 @@ class PostgresDriver(coordination.CoordinationDriver):
     """
 
     CHARACTERISTICS = (
+        coordination.Characteristics.NON_TIMEOUT_BASED,
         coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
         coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
         coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,
