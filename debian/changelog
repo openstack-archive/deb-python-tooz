@@ -1,9 +1,13 @@
-python-tooz (1.34.0-3) UNRELEASED; urgency=medium
+python-tooz (1.40.0-1) experimental; urgency=medium
 
+  [ Ondřej Nový ]
   * Standards-Version is 3.9.8 now (no change)
   * d/rules: Changed UPSTREAM_GIT protocol to https
 
- -- Ondřej Nový <novy@ondrej.org>  Sat, 09 Apr 2016 19:31:29 +0200
+  [ Thomas Goirand ]
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 13 Jul 2016 13:01:52 +0200
 
 python-tooz (1.34.0-2) unstable; urgency=medium
 
