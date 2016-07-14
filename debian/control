@@ -96,6 +96,7 @@ Depends: python-concurrent.futures (>= 3.0),
          python-zake,
          ${misc:Depends},
          ${python:Depends},
+Suggests: python-sysv-ipc,
 Description: coordination library for distributed systems - Python 2.x
  The Tooz project centralizes the most common distributed primitives like group
  membership protocol, lock service and leader election by providing a
@@ -123,6 +124,7 @@ Depends: python3-fasteners,
          python3-zake,
          ${misc:Depends},
          ${python3:Depends},
+Suggests: python3-sysv-ipc,
 Description: coordination library for distributed systems - Python 3.x
  The Tooz project centralizes the most common distributed primitives like group
  membership protocol, lock service and leader election by providing a

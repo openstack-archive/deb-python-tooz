@@ -1,3 +1,9 @@
+python-tooz (1.40.0-2) UNRELEASED; urgency=medium
+
+  * d/control: Add python(3)-sysv-ipc to Suggests.
+
+ -- Corey Bryant <corey.bryant@canonical.com>  Thu, 14 Jul 2016 09:04:06 -0400
+
 python-tooz (1.40.0-1) experimental; urgency=medium
 
   [ Ondřej Nový ]
