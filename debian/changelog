@@ -1,4 +1,4 @@
-python-tooz (1.40.0-3) UNRELEASED; urgency=medium
+python-tooz (1.40.0-3) unstable; urgency=medium
 
   * d/s/options: extend-diff-ignore of .gitreview
   * d/control: Use correct branch in Vcs-* fields
