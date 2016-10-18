@@ -1,0 +1,8 @@
+Code-Review+2: Joshua Harlow <jxharlow@godaddy.com>
+Workflow+1: Joshua Harlow <jxharlow@godaddy.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 17 Oct 2016 18:35:39 +0000
+Reviewed-on: https://review.openstack.org/387049
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
