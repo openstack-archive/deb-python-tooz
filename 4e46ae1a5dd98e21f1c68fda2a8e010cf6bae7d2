@@ -1,0 +1,9 @@
+Code-Review+2: Doug Hellmann <doug@doughellmann.com>
+Code-Review+2: Flavio Percoco <fpercoco@redhat.com>
+Workflow+1: Flavio Percoco <fpercoco@redhat.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Thu, 10 Nov 2016 22:05:29 +0000
+Reviewed-on: https://review.openstack.org/395675
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
