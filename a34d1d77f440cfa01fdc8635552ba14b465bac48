@@ -1,0 +1,9 @@
+Code-Review+2: Joshua Harlow <jxharlow@godaddy.com>
+Code-Review+2: ChangBo Guo(gcb) <glongwave@gmail.com>
+Workflow+1: ChangBo Guo(gcb) <glongwave@gmail.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Fri, 18 Nov 2016 08:27:46 +0000
+Reviewed-on: https://review.openstack.org/395842
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
