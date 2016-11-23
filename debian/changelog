@@ -1,3 +1,10 @@
+python-tooz (1.40.0-4) UNRELEASED; urgency=medium
+
+  * Bumped debhelper compat version to 10
+  * B-D on default-mysql-server instead of mysql-server
+
+ -- Ondřej Nový <onovy@debian.org>  Thu, 24 Nov 2016 00:12:04 +0100
+
 python-tooz (1.40.0-3) unstable; urgency=medium
 
   * d/s/options: extend-diff-ignore of .gitreview
