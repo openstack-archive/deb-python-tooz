@@ -1,7 +1,7 @@
-python-tooz (1.40.0-4) UNRELEASED; urgency=medium
+python-tooz (1.40.0-4) unstable; urgency=medium
 
   * Bumped debhelper compat version to 10
-  * B-D on default-mysql-server instead of mysql-server
+  * B-D on default-mysql-server instead of mysql-server (Closes: #848290).
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 24 Nov 2016 00:12:04 +0100
 
