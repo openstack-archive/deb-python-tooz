@@ -1,0 +1,9 @@
+Code-Review+2: Julien Danjou <julien@danjou.info>
+Code-Review+2: ChangBo Guo(gcb) <glongwave@gmail.com>
+Workflow+1: ChangBo Guo(gcb) <glongwave@gmail.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Fri, 23 Dec 2016 13:14:08 +0000
+Reviewed-on: https://review.openstack.org/413365
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
