@@ -1,0 +1,8 @@
+Code-Review+2: Mehdi Abaakouk (sileht) <sileht@redhat.com>
+Workflow+1: Joshua Harlow <jxharlow@godaddy.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 10 Jan 2017 20:25:43 +0000
+Reviewed-on: https://review.openstack.org/398604
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
