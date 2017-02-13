@@ -1,0 +1,8 @@
+Code-Review+2: ChangBo Guo(gcb) <glongwave@gmail.com>
+Workflow+1: ChangBo Guo(gcb) <glongwave@gmail.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Mon, 13 Feb 2017 17:21:33 +0000
+Reviewed-on: https://review.openstack.org/431697
+Project: openstack/deb-python-tooz
+Branch: refs/heads/stable/ocata
