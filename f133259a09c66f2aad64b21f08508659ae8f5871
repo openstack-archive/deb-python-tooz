@@ -1,0 +1,8 @@
+Code-Review+2: Julien Danjou <julien@danjou.info>
+Workflow+1: Julien Danjou <julien@danjou.info>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Tue, 14 Mar 2017 17:58:01 +0000
+Reviewed-on: https://review.openstack.org/445470
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
