@@ -1,0 +1,9 @@
+Code-Review+2: Mehdi Abaakouk (sileht) <sileht@sileht.net>
+Code-Review+2: gordon chung <gord@live.ca>
+Workflow+1: Julien Danjou <julien@danjou.info>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Fri, 16 Jun 2017 13:56:44 +0000
+Reviewed-on: https://review.openstack.org/472598
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
