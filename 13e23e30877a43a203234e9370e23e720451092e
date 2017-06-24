@@ -1,0 +1,8 @@
+Code-Review+2: gordon chung <gord@live.ca>
+Workflow+1: Joshua Harlow <jxharlow@godaddy.com>
+Verified+2: Jenkins
+Submitted-by: Jenkins
+Submitted-at: Sat, 24 Jun 2017 06:40:36 +0000
+Reviewed-on: https://review.openstack.org/472198
+Project: openstack/deb-python-tooz
+Branch: refs/heads/master
