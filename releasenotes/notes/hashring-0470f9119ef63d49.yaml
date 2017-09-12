@@ -1,3 +1,0 @@
----
-features:
-  - Add `tooz.hashring`, a consistent hash ring implementation.
